@@ -7,17 +7,13 @@ load_dotenv()
 
 class OdooMCPServer:
 
-    def __init__(self, mcp):
+    def __init__(self, mcp, config):
         self.mcp = mcp
         self.common = None
         self.models = None
         self.uid = None
 
-        self.odoo_url = os.getenv("ODOO_URL")
-        self.odoo_db = os.getenv("ODOO_DB")
-        self.odoo_username = os.getenv("ODOO_USERNAME")
-        self.odoo_password = os.getenv("ODOO_PASSWORD")
-        self.odoo_db = os.getenv("ODOO_DATABASE")
+        self.config = config
 
     def initialize_server(self):
         self._connect_to_odoo()
@@ -34,16 +30,16 @@ class OdooMCPServer:
 
         try:
             print(
-                f"Connecting to Odoo at {self.odoo_url} with database {self.odoo_db} and user {self.odoo_username}"
+                f"Connecting to Odoo at {self.config.odoo_url} with database {self.config.odoo_database} and user {self.config.odoo_username}"
             )
             self.common = xmlrpc.client.ServerProxy(
-                f"{self.odoo_url}/xmlrpc/2/common", transport=transport
+                f"{self.config.odoo_url}/xmlrpc/2/common", transport=transport
             )
             self.uid = self.common.authenticate(
-                self.odoo_db, self.odoo_username, self.odoo_password, {}
+                self.config.odoo_database, self.config.odoo_username, self.config.odoo_password, {}
             )
             self.models = xmlrpc.client.ServerProxy(
-                f"{self.odoo_url}/xmlrpc/2/object", transport=transport
+                f"{self.config.odoo_url}/xmlrpc/2/object", transport=transport
             )
             print(f"Connected to Odoo as user ID {self.uid}")
 
@@ -61,4 +57,4 @@ class OdooMCPServer:
             raise e
 
     def _add_tools(self):
-        self.tools = OdooTools(self.mcp)
+        self.tools = OdooTools(self.mcp, self.config, self)

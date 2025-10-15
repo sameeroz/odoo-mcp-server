@@ -7,8 +7,8 @@ import sys
 
 def main():
     try:
-        OdooConfig()
-        server = OdooMCPServer(mcp)
+        config = OdooConfig()
+        server = OdooMCPServer(mcp, config)
         server.initialize_server()
         mcp.run()
 
