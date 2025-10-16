@@ -117,8 +117,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
+      "command": "uv",
+      "args": ["run", "src/mcpserver/__main__.py"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -141,8 +141,8 @@ Add to `~/.cursor/mcp_settings.json`:
 {
   "mcpServers": {
     "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
+      "command": "uv",
+      "args": ["run", "src/mcpserver/__main__.py"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -165,8 +165,8 @@ Add to your VS Code settings (`~/.vscode/mcp_settings.json` or workspace setting
 {
   "github.copilot.chat.mcpServers": {
     "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
+      "command": "uv",
+      "args": ["run", "src/mcpserver/__main__.py"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -189,8 +189,8 @@ Add to `~/.config/zed/settings.json`:
 {
   "context_servers": {
     "odoo": {
-      "command": "uvx",
-      "args": ["mcp-server-odoo"],
+      "command": "uv",
+      "args": ["run", "src/mcpserver/__main__.py"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
