@@ -1,5 +1,4 @@
 from typing import Any, List
-from openai import OpenAI
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime
 import pytz

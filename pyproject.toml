@@ -1,16 +1,21 @@
 [project]
 name = "odoo-mcp-server"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP Server for Odoo"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    { name = "Sameer Anwar", email = "gdrboy11@gmail.com" }
+]
+license = { text = "MIT" }
+keywords = ["mcp", "mcp-client", "odoo", "model-context-protocol", "openai", "odoo-mcp", "odoo-mcp-server"]
 dependencies = [
     "mcp[cli]>=1.13.1",
-    "openai>=1.107.1",
+    "pytz>=2025.2",
 ]
 
 [project.scripts]
-mcp-server = "mcpserver.__main__:main"
+odoo-mcp-server = "src.mcpserver.__main__:main"
 
 [build-system]
 requires = ["setuptools"]
