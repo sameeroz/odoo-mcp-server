@@ -9,28 +9,51 @@ class ConfigValidationError(Exception):
 class OdooConfig:
     """
     Holds required configuration from environment. Validates values on creation.
+    Supports two authentication methods:
+      1. API Key (preferred) — set ODOO_API_KEY
+      2. Username/Password (fallback) — set ODOO_USERNAME and ODOO_PASSWORD
     """
 
     _URL_PATTERN = re.compile(r"^https?://")  # simple validation
 
     def __init__(self):
-        # Load from environment (or .env if you use python-dotenv)
-        # e.g. from dotenv import load_dotenv; load_dotenv()
         self.odoo_url = os.getenv("ODOO_URL")
+        self.odoo_database = os.getenv("ODOO_DATABASE")
+        self.odoo_timezone = os.getenv("ODOO_TIMEZONE", "UTC")
+
+        # Auth method 1: API key (preferred)
+        self.odoo_api_key = os.getenv("ODOO_API_KEY")
+
+        # Auth method 2: Username/password (fallback)
         self.odoo_username = os.getenv("ODOO_USERNAME")
         self.odoo_password = os.getenv("ODOO_PASSWORD")
-        self.odoo_database = os.getenv("ODOO_DATABASE")
 
         self._validate()
+
+    @property
+    def auth_method(self) -> str:
+        """Returns the active authentication method: 'api_key' or 'password'."""
+        if self.odoo_api_key:
+            return "api_key"
+        return "password"
+
+    @property
+    def auth_credential(self) -> str:
+        """Returns the credential to use for XML-RPC calls (API key or password)."""
+        if self.odoo_api_key:
+            return str(self.odoo_api_key)
+        return self.odoo_password or ""
+
+    @property
+    def auth_username(self) -> str:
+        """Returns the username for authentication.
+        With API key auth, the username is still needed for XML-RPC authenticate()."""
+        return self.odoo_username or ""
 
     def _validate(self):
         missing = []
         if not self.odoo_url:
             missing.append("ODOO_URL")
-        if not self.odoo_username:
-            missing.append("ODOO_USERNAME")
-        if not self.odoo_password:
-            missing.append("ODOO_PASSWORD")
         if not self.odoo_database:
             missing.append("ODOO_DATABASE")
 
@@ -41,18 +64,24 @@ class OdooConfig:
         if not self._URL_PATTERN.match(self.odoo_url):
             raise ConfigValidationError(f"ODOO_URL must start with http:// or https:// - got: {self.odoo_url}")
 
-        # (Optional) Validate password strength or username format
-        # if len(self.odoo_username) < 3:
-        #     raise ConfigValidationError("ODOO_USERNAME too short (min 3 chars)")
-        # if len(self.odoo_password) < 8:
-        #     raise ConfigValidationError("ODOO_PASSWORD too short (min 8 chars)")
+        # Must have either API key OR username+password
+        has_api_key = bool(self.odoo_api_key)
+        has_credentials = bool(self.odoo_username) and bool(self.odoo_password)
+
+        if not has_api_key and not has_credentials:
+            raise ConfigValidationError(
+                "Authentication required: set ODOO_API_KEY (preferred) "
+                "or both ODOO_USERNAME and ODOO_PASSWORD"
+            )
 
     def as_dict(self):
-        """Return config values, maybe hiding password in logs."""
+        """Return config values, hiding sensitive fields."""
         return {
             "odoo_url": self.odoo_url,
-            "odoo_username": self.odoo_username,
-            "odoo_password": "***"  # do not show password
+            "odoo_database": self.odoo_database,
+            "auth_method": self.auth_method,
+            "odoo_username": self.auth_username,
+            "credential": "***",
         }
 
 def prepare_error(code: int, message: str, data=None) -> McpError:

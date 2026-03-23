@@ -1,9 +1,11 @@
 from typing import Any, List
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime
+import logging
 import pytz
 import xmlrpc
-import traceback
+
+logger = logging.getLogger(__name__)
 
 
 class OdooTools:
@@ -20,20 +22,20 @@ class OdooTools:
             return self.odoo_server.models.execute_kw(
                 self.config.odoo_database,
                 self.odoo_server.uid,
-                self.config.odoo_password,
+                self.config.auth_credential,
                 model,
                 method,
                 args,
                 kwargs,
             )
         except Exception as e:
-            print(f"[Error] Odoo call failed for {model}.{method}: {e}")
+            logger.error("Odoo call failed for %s.%s: %s", model, method, e)
             return []
 
     def _format_datetime(self, utc_string: str) -> str:
-        """Convert UTC time string from Odoo to Riyadh local time."""
+        """Convert UTC time string from Odoo to configured local time."""
         utc_time = datetime.strptime(utc_string, "%Y-%m-%d %H:%M:%S")
-        local_tz = pytz.timezone("Asia/Riyadh")
+        local_tz = pytz.timezone(self.config.odoo_timezone)
         return (
             utc_time.replace(tzinfo=pytz.utc)
             .astimezone(local_tz)
@@ -109,10 +111,9 @@ class OdooTools:
                 return journal["id"], journal["inbound_payment_method_line_ids"][0]
             elif journal["name"] == "Cash" and journal["inbound_payment_method_line_ids"]:
                 return journal["id"], journal["inbound_payment_method_line_ids"][0]
-        return None
+        return None, None
 
     def _add_mcp_tools(self):
-
         @self.mcp.tool()
         def get_products(product_names_lang: str = "en", limits: int = None) -> dict:
             """
@@ -215,7 +216,7 @@ class OdooTools:
                 str: Human-readable formatted order details.
             """
 
-            search_domain = [] if order_ids is None else ["id", "in", order_ids]
+            search_domain = [] if order_ids is None else [["id", "in", order_ids]]
 
             orders = self._execute_odoo(
                 "sale.order",
@@ -276,7 +277,7 @@ class OdooTools:
 
         @self.mcp.tool()
         def create_order(
-            customer_name: str, product_id, create_invoice=False, finish_payment=False
+            customer_name: str, product_id: int, create_invoice: bool = False, finish_payment: bool = False
         ) -> dict:
             """
             Securely creates an order in Odoo, generates the corresponding invoice,
@@ -304,18 +305,18 @@ class OdooTools:
                         "message": "Customer name is required to create an order.",
                     }
 
-                # --- Check product existance ---
-                check_product_existance = self._execute_odoo(
+                # --- Check product existence ---
+                check_product_existence = self._execute_odoo(
                     "product.product",
                     "search_read",
-                    [[["id", "ilike", product_id]]],
+                    [[["id", "=", product_id]]],
                     **{
                         "fields": ["id", "name", "list_price", "description_sale"],
                         "limit": 1,
                     },
                 )
 
-                if not check_product_existance:
+                if not check_product_existence:
                     return {
                         "success": False,
                         "message": f"No product found with the ID: {product_id}",
@@ -348,16 +349,17 @@ class OdooTools:
                     "product_uom_qty": 1,
                 }
 
+                # --- Create order line BEFORE confirming ---
+                line_id = self._execute_odoo(
+                    "sale.order.line", "create", [order_line_data]
+                )
+
                 # --- Confirm order ---
                 self._execute_odoo("sale.order", "action_confirm", [order_id])
 
                 # --- Create and post invoice ---
 
                 if create_invoice:
-
-                    line_id = self._execute_odoo(
-                        "sale.order.line", "create", [order_line_data]
-                    )
 
                     invoice_id = self._execute_odoo(
                         "account.move",
@@ -436,15 +438,191 @@ class OdooTools:
             except xmlrpc.client.Fault as e:
                 err_msg = str(e)
                 if "Record does not exist or has been deleted" in err_msg:
-                    print(f"[Error] Missing product record: {err_msg}")
+                    logger.error("Missing product record: %s", err_msg)
                     return {
                         "success": False,
                         "message": "One of the products does not exist in Odoo.",
                     }
-                print(f"[XML-RPC Fault] {err_msg}")
+                logger.error("XML-RPC Fault: %s", err_msg)
                 return {"success": False, "message": f"Odoo fault: {err_msg}"}
 
             except Exception as e:
-                print(f"[Exception] {e}")
-                traceback.print_exc()
+                logger.exception("Unexpected error creating order: %s", e)
                 return {"success": False, "message": f"Unexpected error: {e}"}
+
+        @self.mcp.tool()
+        def get_customers(limit: int = 20, offset: int = 0) -> dict:
+            """
+            Retrieve a list of customers (partners) from Odoo.
+
+            Args:
+                limit: Maximum number of customers to return (default 20).
+                offset: Number of records to skip for pagination (default 0).
+
+            Returns:
+                A dictionary with a list of customers and total count.
+            """
+            # Get total count
+            total_count = self._execute_odoo(
+                "res.partner",
+                "search_count",
+                [[["|", ("is_company", "=", True), ("parent_id", "=", False)]]],
+            )
+
+            customers = self._execute_odoo(
+                "res.partner",
+                "search_read",
+                [[["|", ("is_company", "=", True), ("parent_id", "=", False)]]],
+                **{
+                    "fields": [
+                        "id", "name", "email", "phone", "mobile",
+                        "street", "city", "country_id",
+                        "customer_rank", "credit", "debit",
+                    ],
+                    "limit": limit,
+                    "offset": offset,
+                    "order": "name asc",
+                },
+            )
+
+            if not customers:
+                return {"customers": [], "total_count": 0, "message": "No customers found."}
+
+            return {
+                "customers": customers,
+                "total_count": total_count,
+                "returned": len(customers),
+                "offset": offset,
+            }
+
+        @self.mcp.tool()
+        def search_customers(
+            query: str, search_by: str = "name", limit: int = 10
+        ) -> dict:
+            """
+            Search for customers in Odoo by name, email, or phone.
+
+            Args:
+                query: The search term to look for.
+                search_by: Field to search by - 'name', 'email', 'phone', or 'all' (default 'name').
+                limit: Maximum number of results to return (default 10).
+
+            Returns:
+                A dictionary with matching customers.
+            """
+            if not query or not query.strip():
+                return {"success": False, "message": "Search query is required."}
+
+            search_fields = {
+                "name": [["name", "ilike", query]],
+                "email": [["email", "ilike", query]],
+                "phone": ["|", ["phone", "ilike", query], ["mobile", "ilike", query]],
+                "all": [
+                    "|", "|", "|",
+                    ["name", "ilike", query],
+                    ["email", "ilike", query],
+                    ["phone", "ilike", query],
+                    ["mobile", "ilike", query],
+                ],
+            }
+
+            domain = search_fields.get(search_by.lower(), search_fields["name"])
+
+            customers = self._execute_odoo(
+                "res.partner",
+                "search_read",
+                [domain],
+                **{
+                    "fields": [
+                        "id", "name", "email", "phone", "mobile",
+                        "street", "city", "country_id",
+                    ],
+                    "limit": limit,
+                },
+            )
+
+            if not customers:
+                return {"customers": [], "message": f"No customers found matching '{query}'."}
+
+            return {"customers": customers, "count": len(customers)}
+
+        @self.mcp.tool()
+        def create_customer(
+            name: str,
+            email: str = "",
+            phone: str = "",
+            mobile: str = "",
+            street: str = "",
+            city: str = "",
+            country: str = "",
+            is_company: bool = False,
+        ) -> dict:
+            """
+            Create a new customer (partner) in Odoo.
+
+            Args:
+                name: The customer's name (required).
+                email: The customer's email address.
+                phone: The customer's phone number.
+                mobile: The customer's mobile number.
+                street: The customer's street address.
+                city: The customer's city.
+                country: The country name (e.g., 'Saudi Arabia', 'United States').
+                is_company: Whether this is a company (True) or individual (False).
+
+            Returns:
+                A dictionary with success status and the new customer's ID.
+            """
+            if not name or not name.strip():
+                return {"success": False, "message": "Customer name is required."}
+
+            # Check if customer already exists
+            existing = self._get_partner_id_by_name(name)
+            if existing:
+                return {
+                    "success": False,
+                    "message": f"A customer with the name '{name}' already exists (ID: {existing}).",
+                    "existing_id": existing,
+                }
+
+            partner_data = {
+                "name": name.strip(),
+                "is_company": is_company,
+                "customer_rank": 1,
+            }
+
+            if email:
+                partner_data["email"] = email
+            if phone:
+                partner_data["phone"] = phone
+            if mobile:
+                partner_data["mobile"] = mobile
+            if street:
+                partner_data["street"] = street
+            if city:
+                partner_data["city"] = city
+
+            # Look up country by name if provided
+            if country:
+                countries = self._execute_odoo(
+                    "res.country",
+                    "search_read",
+                    [[[("name", "ilike", country)]]],
+                    **{"fields": ["id", "name"], "limit": 1},
+                )
+                if countries:
+                    partner_data["country_id"] = countries[0]["id"]
+
+            try:
+                partner_id = self._execute_odoo(
+                    "res.partner", "create", [partner_data]
+                )
+                return {
+                    "success": True,
+                    "message": f"Customer '{name}' created successfully.",
+                    "customer_id": partner_id,
+                }
+            except Exception as e:
+                logger.exception("Error creating customer: %s", e)
+                return {"success": False, "message": f"Failed to create customer: {e}"}
+

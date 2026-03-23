@@ -1,8 +1,11 @@
 import os
+import logging
 import xmlrpc.client
 import socket
 from dotenv import load_dotenv
 from .tools import OdooTools
+
+logger = logging.getLogger(__name__)
 load_dotenv()
 
 class OdooMCPServer:
@@ -18,7 +21,7 @@ class OdooMCPServer:
     def initialize_server(self):
         self._connect_to_odoo()
         self._add_tools()
-        print("OdooMCPServer initialized and tools added.")
+        logger.info("OdooMCPServer initialized and tools added.")
     def _connect_to_odoo(self):
 
         # Initialize XML-RPC connections
@@ -29,31 +32,32 @@ class OdooMCPServer:
         transport.timeout = timeout
 
         try:
-            print(
-                f"Connecting to Odoo at {self.config.odoo_url} with database {self.config.odoo_database} and user {self.config.odoo_username}"
+            logger.info(
+                "Connecting to Odoo at %s with database %s (auth: %s)",
+                self.config.odoo_url, self.config.odoo_database, self.config.auth_method
             )
             self.common = xmlrpc.client.ServerProxy(
                 f"{self.config.odoo_url}/xmlrpc/2/common", transport=transport
             )
             self.uid = self.common.authenticate(
-                self.config.odoo_database, self.config.odoo_username, self.config.odoo_password, {}
+                self.config.odoo_database, self.config.auth_username, self.config.auth_credential, {}
             )
             self.models = xmlrpc.client.ServerProxy(
                 f"{self.config.odoo_url}/xmlrpc/2/object", transport=transport
             )
-            print(f"Connected to Odoo as user ID {self.uid}")
+            logger.info("Connected to Odoo as user ID %s (via %s)", self.uid, self.config.auth_method)
 
         except xmlrpc.client.Fault as e:
-            print(f"XML-RPC Fault: {e.faultCode} - {e.faultString}")
+            logger.error("XML-RPC Fault: %s - %s", e.faultCode, e.faultString)
             raise e
-        except socket.timeout:
-            print("Connection timed out, coulddn't connect to Odoo server.")
+        except socket.timeout as e:
+            logger.error("Connection timed out, couldn't connect to Odoo server.")
             raise e
-        except TimeoutError:
-            print("TimeoutError: The connection took too long to respond.")
+        except TimeoutError as e:
+            logger.error("TimeoutError: The connection took too long to respond.")
             raise e
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
+            logger.error("An unexpected error occurred: %s", e)
             raise e
 
     def _add_tools(self):
