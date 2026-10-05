@@ -47,6 +47,8 @@ class FakeModels:
         self.calls.append((model, method, args, kw))
         if self.fail == (model, method):
             raise xmlrpc.client.Fault(1, "boom")
+        if (model, method) == ("product.product", "search_count"):
+            return 123
         if model == "product.product":
             return [{"id": 5, "name": "P"}]
         if (model, method) == ("res.partner", "create"):
@@ -62,6 +64,7 @@ class FakeModels:
             return self.journals
         results = {
             ("sale.order", "create"): 100,
+            ("sale.order", "search_read"): [],
             ("sale.order.line", "read"): [],
             ("sale.order.line", "create"): 200,
             ("sale.advance.payment.inv", "create"): 300,

@@ -9,6 +9,61 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_PRODUCT_LIMIT = 50
+MAX_PRODUCT_LIMIT = 500
+MAX_LIMIT = 200  # customers and orders
+ORDER_DISPLAY_FIELDS = (
+    "name",
+    "date_order",
+    "state",
+    "order_line",
+    "amount_total",
+    "currency_id",
+)
+SEARCH_CUSTOMER_FIELDS = ("name", "email", "phone", "all")
+MAX_ERROR_LENGTH = 200
+
+
+class OdooToolError(Exception):
+    """Error raised by the tools themselves; its message is written for the client and
+    is passed through unchanged by safe_error."""
+
+
+def safe_error(exc: BaseException) -> str:
+    """Short, user-safe description of an exception. Full detail stays in the server log.
+    Odoo faults keep their one-line summary (e.g. 'Access Denied', AccessError text) with any
+    traceback stripped; other exceptions are reduced to their class name."""
+    if isinstance(exc, OdooToolError):
+        return str(exc)
+    if isinstance(exc, xmlrpc.client.Fault):
+        lines = str(exc.faultString or "").splitlines()
+        had_traceback = any(line.startswith("Traceback") for line in lines)
+        kept = [
+            line.strip()
+            for line in lines
+            if line.strip()
+            and not line.startswith(("Traceback", " ", "\t"))
+        ]
+        if kept:
+            # Odoo puts the exception summary last when a traceback is present.
+            summary = kept[-1] if had_traceback else kept[0]
+            return f"Odoo error: {summary[:MAX_ERROR_LENGTH]}"
+        return "Odoo error: request failed"
+    return f"Odoo request failed: {type(exc).__name__}"
+
+
+def validate_paging(limit, offset, max_limit, name="limit"):
+    """Validate pagination input. Returns (limit, offset, error): `limit` is clamped to
+    max_limit; non-ints (including bool), limit < 1 and offset < 0 give an error message."""
+    for label, value in ((name, limit), ("offset", offset)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None, None, f"{label} must be an integer - got: {value!r}"
+    if limit < 1:
+        return None, None, f"{name} must be at least 1 - got: {limit}"
+    if offset < 0:
+        return None, None, f"offset must be 0 or greater - got: {offset}"
+    return min(limit, max_limit), offset, None
+
 
 class OdooTools:
 
@@ -51,13 +106,14 @@ class OdooTools:
             .strftime("%Y-%m-%d %H:%M:%S")
         )
 
-    def _get_order_lines(self, order_line_ids: List[int]) -> str:
-        """Retrieve and format order line details."""
-
+    def _read_order_lines(self, line_ids: List[int]) -> dict:
+        """Read all given sale.order.line ids in ONE call; returns {line_id: record}."""
+        if not line_ids:
+            return {}
         order_lines = self._execute_odoo(
             "sale.order.line",
             "read",
-            [order_line_ids],
+            [line_ids],
             **{
                 "fields": [
                     "product_id",
@@ -69,6 +125,12 @@ class OdooTools:
                 "context": {"lang": "en_US"},
             },
         )
+        return {line["id"]: line for line in order_lines}
+
+    @staticmethod
+    def _format_order_lines(order_line_ids: List[int], lines_by_id: dict) -> str:
+        """Format the order lines of one order, in the order of its line ids."""
+        order_lines = [lines_by_id[i] for i in order_line_ids if i in lines_by_id]
 
         if not order_lines:
             return f"- No order items found for {order_line_ids}"
@@ -149,16 +211,26 @@ class OdooTools:
                 readOnlyHint=True, destructiveHint=False, idempotentHint=True
             )
         )
-        def get_products(product_names_lang: str = "en", limits: int | None = None) -> dict:
+        def get_products(
+            product_names_lang: str = "en", limits: int | None = None, offset: int = 0
+        ) -> dict:
             """
             Returns a list of products from Odoo.
             Args:
                 product_names_lang: the language to use for the product names.
-                limits: the number of products to return, if None, all products are returned.
+                limits: the number of products to return (default 50, maximum 500).
+                offset: number of products to skip for pagination (default 0).
 
             Returns:
-                A dictionary with a list of products, each product is a dictionary with 'name' and 'list_price' keys.
+                A dictionary with a list of products (each a dictionary with 'name' and
+                'list_price' keys), 'total_count', 'returned' and 'offset'.
             """
+
+            if limits is None:
+                limits = DEFAULT_PRODUCT_LIMIT
+            limits, offset, error = validate_paging(limits, offset, MAX_PRODUCT_LIMIT, "limits")
+            if error:
+                return {"success": False, "message": error}
 
             supported_languages = {
                 "en": "en_US",
@@ -174,6 +246,7 @@ class OdooTools:
                 product_names_lang = "en_US"
 
             try:
+                total_count = self._execute_odoo("product.product", "search_count", [[]])
                 products = self._execute_odoo(
                     "product.product",
                     "search_read",
@@ -181,16 +254,29 @@ class OdooTools:
                     **{
                         "fields": ["name", "list_price"],
                         "context": {"lang": product_names_lang},
-                        **({"limit": limits} if limits else {}),
+                        "limit": limits,
+                        "offset": offset,
+                        "order": "id asc",
                     },
                 )
             except Exception as e:
-                return {"success": False, "message": f"Failed to retrieve products: {e}"}
+                return {"success": False, "message": f"Failed to retrieve products: {safe_error(e)}"}
 
             if not products:
-                return {"products": [], "message": "No products available."}
+                return {
+                    "products": [],
+                    "total_count": total_count,
+                    "returned": 0,
+                    "offset": offset,
+                    "message": "No products available.",
+                }
 
-            return {"products": products}
+            return {
+                "products": products,
+                "total_count": total_count,
+                "returned": len(products),
+                "offset": offset,
+            }
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
@@ -232,7 +318,7 @@ class OdooTools:
                         product_data = searched_products[0]
                         break
             except Exception as e:
-                return f"Error: failed to retrieve product details: {e}"
+                return f"Error: failed to retrieve product details: {safe_error(e)}"
 
             if not product_data:
                 return f"No product found with the name: {product_name}"
@@ -249,40 +335,65 @@ class OdooTools:
             )
         )
         def get_order_details(
-            limits: int = 1, order_ids: List[Any] = None, fields: List[str] = None
+            limits: int = 1, order_ids: List[int] = None, fields: List[str] = None
         ):
             """
             Retrieve and format order details from Odoo.
 
             Args:
-                limits (int): Maximum number of orders to retrieve if order_ids not provided.
+                limits (int): Maximum number of orders to retrieve (1-200, default 1).
                 order_ids (List[int], optional): Specific order IDs to fetch.
-                fields (List[str], optional): Specific fields to include in the output.
-                                            If None, full order details are returned.
+                fields (List[str], optional): Fields to include in the output, any of
+                    name, date_order, state, order_line, amount_total, currency_id.
+                    If None, all of them are returned.
 
             Returns:
                 str: Human-readable formatted order details.
             """
 
+            limits, _, error = validate_paging(limits, 0, MAX_LIMIT, "limits")
+            if error:
+                return f"Error: {error}"
+
+            if order_ids is not None and (
+                not isinstance(order_ids, list)
+                or any(isinstance(i, bool) or not isinstance(i, int) for i in order_ids)
+            ):
+                return "Error: order_ids must be a list of integers."
+
+            if fields is not None:
+                if not isinstance(fields, list) or any(not isinstance(f, str) for f in fields):
+                    return "Error: fields must be a list of field names."
+                unknown = [f for f in fields if f not in ORDER_DISPLAY_FIELDS]
+                if unknown:
+                    return (
+                        f"Error: unknown fields: {', '.join(unknown)}. "
+                        f"Allowed fields: {', '.join(ORDER_DISPLAY_FIELDS)}."
+                    )
+
             search_domain = [] if order_ids is None else [["id", "in", order_ids]]
+            display_fields = fields or list(ORDER_DISPLAY_FIELDS)
 
             try:
                 orders = self._execute_odoo(
                     "sale.order",
                     "search_read",
-                    [
-                        [
-                            # ["partner_id.id", "=", emails[user_email]] # Filter by Employee Id
-                            *search_domain
-                        ]
-                    ],
-                    **{"limit": limits},
+                    [[*search_domain]],
+                    **{"fields": list(ORDER_DISPLAY_FIELDS), "limit": limits},
                 )
             except Exception as e:
-                return f"Error: failed to retrieve orders: {e}"
+                return f"Error: failed to retrieve orders: {safe_error(e)}"
 
             if not orders:
                 return "No orders available."
+
+            lines_by_id = {}
+            if "order_line" in display_fields:
+                all_line_ids = [i for order in orders for i in order.get("order_line", [])]
+                try:
+                    lines_by_id = self._read_order_lines(all_line_ids)
+                except Exception as e:
+                    return f"Error: failed to retrieve order lines: {safe_error(e)}"
 
             results = []
             for order in orders:
@@ -290,20 +401,7 @@ class OdooTools:
 
                 # Common values
                 formatted_date = self._format_datetime(order["date_order"])
-                try:
-                    order_items = self._get_order_lines(order.get("order_line", []))
-                except Exception as e:
-                    return f"Error: failed to retrieve order lines: {e}"
-
-                # Determine which fields to display
-                display_fields = fields or [
-                    "name",
-                    "date_order",
-                    "state",
-                    "order_line",
-                    "amount_total",
-                    "currency_id",
-                ]
+                order_items = self._format_order_lines(order.get("order_line", []), lines_by_id)
 
                 for field in display_fields:
                     match field:
@@ -339,12 +437,16 @@ class OdooTools:
             Retrieve a list of customers (partners) from Odoo.
 
             Args:
-                limit: Maximum number of customers to return (default 20).
+                limit: Maximum number of customers to return (1-200, default 20).
                 offset: Number of records to skip for pagination (default 0).
 
             Returns:
                 A dictionary with a list of customers and total count.
             """
+            limit, offset, error = validate_paging(limit, offset, MAX_LIMIT)
+            if error:
+                return {"success": False, "message": error}
+
             domain = ["|", ("is_company", "=", True), ("parent_id", "=", False)]
 
             try:
@@ -369,7 +471,7 @@ class OdooTools:
                     },
                 )
             except Exception as e:
-                return {"success": False, "message": f"Failed to retrieve customers: {e}"}
+                return {"success": False, "message": f"Failed to retrieve customers: {safe_error(e)}"}
 
             if not customers:
                 return {"customers": [], "total_count": 0, "message": "No customers found."}
@@ -395,13 +497,27 @@ class OdooTools:
             Args:
                 query: The search term to look for.
                 search_by: Field to search by - 'name', 'email', 'phone', or 'all' (default 'name').
-                limit: Maximum number of results to return (default 10).
+                limit: Maximum number of results to return (1-200, default 10).
 
             Returns:
                 A dictionary with matching customers.
             """
             if not query or not query.strip():
                 return {"success": False, "message": "Search query is required."}
+
+            search_by = search_by.lower() if isinstance(search_by, str) else search_by
+            if search_by not in SEARCH_CUSTOMER_FIELDS:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Invalid search_by {search_by!r}. "
+                        f"Valid options: {', '.join(SEARCH_CUSTOMER_FIELDS)}."
+                    ),
+                }
+
+            limit, _, error = validate_paging(limit, 0, MAX_LIMIT)
+            if error:
+                return {"success": False, "message": error}
 
             q = self._escape_like(query)
             search_fields = {
@@ -417,7 +533,7 @@ class OdooTools:
                 ],
             }
 
-            domain = search_fields.get(search_by.lower(), search_fields["name"])
+            domain = search_fields[search_by]
 
             try:
                 customers = self._execute_odoo(
@@ -433,7 +549,7 @@ class OdooTools:
                     },
                 )
             except Exception as e:
-                return {"success": False, "message": f"Failed to search customers: {e}"}
+                return {"success": False, "message": f"Failed to search customers: {safe_error(e)}"}
 
             if not customers:
                 return {"customers": [], "message": f"No customers found matching '{query}'."}
@@ -614,7 +730,7 @@ class OdooTools:
                     )
                     invoice_ids = order_data[0].get("invoice_ids", []) if order_data else []
                     if len(invoice_ids) != 1:
-                        raise RuntimeError(
+                        raise OdooToolError(
                             f"Expected exactly one invoice on order {order_id}, found {invoice_ids}"
                         )
                     invoice_id = invoice_ids[0]
@@ -688,10 +804,10 @@ class OdooTools:
             except Exception as e:
                 if isinstance(e, xmlrpc.client.Fault):
                     logger.error("XML-RPC Fault in create_order (step: %s): %s", step, e)
-                    detail = f"Odoo fault: {e}"
+                    detail = safe_error(e)
                 else:
                     logger.exception("Unexpected error in create_order (step: %s): %s", step, e)
-                    detail = f"Unexpected error: {e}"
+                    detail = safe_error(e)
                 if not created:
                     return {"success": False, "step": step, "message": f"Failed at step '{step}': {detail}"}
                 return {
@@ -788,4 +904,4 @@ class OdooTools:
                 }
             except Exception as e:
                 logger.exception("Error creating customer: %s", e)
-                return {"success": False, "message": f"Failed to create customer: {e}"}
+                return {"success": False, "message": f"Failed to create customer: {safe_error(e)}"}

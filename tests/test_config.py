@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from mcpserver.config import DEFAULT_TIMEOUT, ConfigValidationError, OdooConfig
@@ -114,3 +116,24 @@ def test_timezone_invalid(monkeypatch, tz):
     monkeypatch.setenv("ODOO_TIMEZONE", tz)
     with pytest.raises(ConfigValidationError, match="ODOO_TIMEZONE"):
         OdooConfig()
+
+
+@pytest.mark.parametrize(
+    "url, warns",
+    [
+        ("http://odoo.example.com", True),
+        ("http://10.0.0.5:8069", True),
+        ("https://odoo.example.com", False),
+        ("http://localhost:8069", False),
+        ("http://127.0.0.1:8069", False),
+        ("http://[::1]:8069", False),
+    ],
+)
+def test_plain_http_warning(monkeypatch, caplog, url, warns):
+    monkeypatch.setenv("ODOO_URL", url)
+    with caplog.at_level(logging.WARNING, logger="mcpserver.config"):
+        OdooConfig()
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert bool(messages) == warns
+    if warns:
+        assert "unencrypted" in messages[0]

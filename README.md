@@ -236,7 +236,8 @@ Add to `~/.config/zed/settings.json`:
 
 **`get_products`**
 
-- Retrieve product catalog with optional language and limit parameters
+- Retrieve the product catalog with optional language, `limits` and `offset` parameters
+- Paginated: `limits` defaults to 50 (maximum 500); `offset` skips records. The result includes `total_count`, `returned` and `offset`
 - Supports: English (en), Arabic (ar), French (fr), Spanish (es)
 - Always returns a dictionary; when there are no products: `{"products": [], "message": "No products available."}`
 
@@ -364,13 +365,13 @@ To add new MCP tools:
 - Create a **dedicated Odoo user** for this server (with an API key) and grant only the access rights it needs. A read-only role is enough for the read tools.
 - Set `ODOO_READ_ONLY=true` unless you need to create customers or orders. The write tools are then not exposed to the MCP client at all.
 - Write tools are annotated for MCP clients (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so they can ask for confirmation; `create_order` is marked destructive because it confirms orders, posts invoices and registers payments.
-- Use `https://` for `ODOO_URL`. Over `http://` the credentials and data travel unencrypted.
+- Use `https://` for `ODOO_URL`. Over `http://` the credentials and data travel unencrypted; the server logs a warning at startup for `http://` URLs that are not localhost (it does not block them).
 
 ## 🔒 Security Considerations
 
 - **Credentials**: Store sensitive information in environment variables
-- **Validation**: All inputs are validated before processing
-- **Error Handling**: Sensitive information is not exposed in error messages
+- **Validation**: All inputs are validated before processing; `limit`/`offset` are range-checked (limits above the maximum of 200, or 500 for products, are clamped), `search_by` and order `fields` must be known values
+- **Error Handling**: Tool errors show only a short one-line summary of Odoo faults (tracebacks stripped) or the exception class name; full detail stays in the server log
 - **Timeouts**: Connection timeouts prevent hanging requests
 - **Permissions**: Ensure Odoo user has minimal required permissions
 

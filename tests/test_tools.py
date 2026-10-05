@@ -7,7 +7,14 @@ from conftest import build_tools
 from mcp.server.fastmcp import FastMCP
 
 from mcpserver.config import OdooConfig
-from mcpserver.tools import OdooTools
+from mcpserver.tools import (
+    DEFAULT_PRODUCT_LIMIT,
+    MAX_LIMIT,
+    MAX_PRODUCT_LIMIT,
+    ORDER_DISPLAY_FIELDS,
+    OdooTools,
+    safe_error,
+)
 
 WRITE_TOOLS = {"create_order", "create_customer"}
 
@@ -100,15 +107,20 @@ def test_get_customers_domain_shape():
 
 def test_get_products_empty_is_dict():
     _, models, fns = build_tools()
-    models.execute_kw = lambda *a: []
-    assert fns["get_products"]() == {"products": [], "message": "No products available."}
+    models.execute_kw = lambda *a: 0 if a[4] == "search_count" else []
+    assert fns["get_products"]() == {
+        "products": [], "total_count": 0, "returned": 0, "offset": 0,
+        "message": "No products available.",
+    }
 
 
 def test_get_products_limit_and_lang():
     _, models, fns = build_tools()
-    assert fns["get_products"]("fr", 3) == {"products": [{"id": 5, "name": "P"}]}
-    kw = models.calls[0][3]
-    assert kw["limit"] == 3 and kw["context"] == {"lang": "fr_FR"}
+    assert fns["get_products"]("fr", 3, 2) == {
+        "products": [{"id": 5, "name": "P"}], "total_count": 123, "returned": 1, "offset": 2,
+    }
+    kw = models.find("product.product", "search_read")[0][3]
+    assert kw["limit"] == 3 and kw["offset"] == 2 and kw["context"] == {"lang": "fr_FR"}
 
 
 def test_format_datetime():
@@ -280,3 +292,253 @@ def test_create_order_configured_journal_not_found(monkeypatch):
     assert r["success"] is False and "NOPE" in r["message"]
     domain = models.find("account.journal", "search_read")[0][2][0]
     assert domain[-3:] == ["|", ["name", "=ilike", "NOPE"], ["code", "=ilike", "NOPE"]]
+
+
+# --- get_products paging ---
+
+def test_get_products_default_limit_and_cap():
+    _, models, fns = build_tools()
+    fns["get_products"]()
+    fns["get_products"](limits=10_000)
+    reads = models.find("product.product", "search_read")
+    assert reads[0][3]["limit"] == DEFAULT_PRODUCT_LIMIT == 50
+    assert reads[0][3]["offset"] == 0
+    assert reads[1][3]["limit"] == MAX_PRODUCT_LIMIT == 500
+
+
+# --- get_order_details batching ---
+
+ORDERS = [
+    {"id": 1, "name": "S1", "date_order": "2024-01-01 00:00:00", "state": "sale",
+     "order_line": [11, 12], "amount_total": 30.0, "currency_id": [1, "USD"]},
+    {"id": 2, "name": "S2", "date_order": False, "state": "draft",
+     "order_line": [13], "amount_total": 5.0, "currency_id": [1, "USD"]},
+    {"id": 3, "name": "S3", "date_order": "2024-01-02 10:00:00", "state": "draft",
+     "order_line": [], "amount_total": 0.0, "currency_id": [1, "USD"]},
+]
+LINES = [
+    {"id": 13, "product_id": [9, "Widget"], "product_uom_qty": 1.0, "price_unit": 5.0},
+    {"id": 12, "product_id": [8, "Gadget"], "product_uom_qty": 2.0, "price_unit": 10.0},
+    {"id": 11, "product_id": [7, "Thing"], "product_uom_qty": 1.0, "price_unit": 10.0},
+]
+EXPECTED_ORDERS = """Order ID: S1
+Date: 2024-01-01 00:00:00
+State: sale
+Order Items:
+- Thing, Qty: 1.0, Price: 10.0 each
+- Gadget, Qty: 2.0, Price: 10.0 each
+Total Amount: 30.0 USD
+
+Order ID: S2
+Date: N/A
+State: draft
+Order Items:
+- Widget, Qty: 1.0, Price: 5.0 each
+Total Amount: 5.0 USD
+
+Order ID: S3
+Date: 2024-01-02 10:00:00
+State: draft
+Order Items:
+- No order items found for []
+Total Amount: 0.0 USD"""
+
+
+def _orders_tools():
+    _, models, fns = build_tools()
+    orig = models.execute_kw
+
+    def execute_kw(db, uid, cred, model, method, args, kw):
+        if (model, method) == ("sale.order", "search_read"):
+            models.calls.append((model, method, args, kw))
+            return ORDERS
+        if (model, method) == ("sale.order.line", "read"):
+            models.calls.append((model, method, args, kw))
+            return LINES  # deliberately not in id order
+        return orig(db, uid, cred, model, method, args, kw)
+
+    models.execute_kw = execute_kw
+    return models, fns
+
+
+def test_get_order_details_batches_line_read_and_keeps_format():
+    models, fns = _orders_tools()
+    assert fns["get_order_details"](limits=3) == EXPECTED_ORDERS
+    assert len(models.calls) == 2
+    assert len(models.find("sale.order.line", "read")) == 1
+    assert models.find("sale.order.line", "read")[0][2] == [[11, 12, 13]]
+    kw = models.find("sale.order", "search_read")[0][3]
+    assert set(kw["fields"]) == set(ORDER_DISPLAY_FIELDS) and kw["limit"] == 3
+
+
+def test_get_order_details_skips_line_read_when_not_displayed():
+    models, fns = _orders_tools()
+    out = fns["get_order_details"](limits=3, fields=["name", "state"])
+    assert out.startswith("Order ID: S1\nState: sale\n\nOrder ID: S2")
+    assert not models.find("sale.order.line", "read")
+
+
+# --- validation ---
+
+@pytest.mark.parametrize(
+    "name, args",
+    [
+        ("get_products", {"limits": 0}),
+        ("get_products", {"limits": True}),
+        ("get_products", {"offset": -1}),
+        ("get_products", {"offset": "1"}),
+        ("get_customers", {"limit": 0}),
+        ("get_customers", {"limit": 1.5}),
+        ("get_customers", {"limit": True}),
+        ("get_customers", {"offset": -1}),
+        ("search_customers", {"query": "a", "limit": -3}),
+        ("search_customers", {"query": "a", "limit": "5"}),
+    ],
+)
+def test_dict_tools_reject_bad_paging(name, args):
+    _, models, fns = build_tools()
+    r = fns[name](**args)
+    assert r["success"] is False and "must be" in r["message"]
+    assert not models.calls
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"limits": 0},
+        {"limits": True},
+        {"limits": "2"},
+        {"order_ids": [1, "2"]},
+        {"order_ids": [True]},
+        {"order_ids": "1"},
+        {"fields": ["name", "secret"]},
+        {"fields": "name"},
+    ],
+)
+def test_get_order_details_rejects_bad_input(args):
+    _, models, fns = build_tools()
+    r = fns["get_order_details"](**args)
+    assert isinstance(r, str) and r.startswith("Error")
+    assert not models.calls
+
+
+def test_get_order_details_unknown_field_lists_allowed():
+    _, _, fns = build_tools()
+    r = fns["get_order_details"](fields=["secret"])
+    assert "secret" in r and all(f in r for f in ORDER_DISPLAY_FIELDS)
+
+
+def test_limits_are_clamped_to_max():
+    _, models, fns = build_tools()
+    fns["get_customers"](limit=10_000)
+    fns["search_customers"]("a", limit=10_000)
+    fns["get_order_details"](limits=10_000)
+    assert models.find("res.partner", "search_read")[0][3]["limit"] == MAX_LIMIT == 200
+    assert models.find("res.partner", "search_read")[1][3]["limit"] == MAX_LIMIT
+    assert models.find("sale.order", "search_read")[0][3]["limit"] == MAX_LIMIT
+
+
+def test_order_ids_domain_and_valid_ints():
+    _, models, fns = build_tools()
+    fns["get_order_details"](order_ids=[4, 5])
+    assert models.find("sale.order", "search_read")[0][2] == [[["id", "in", [4, 5]]]]
+
+
+def test_search_by_invalid_lists_options():
+    _, models, fns = build_tools()
+    r = fns["search_customers"]("a", search_by="nmae")
+    assert r["success"] is False
+    assert all(o in r["message"] for o in ("name", "email", "phone", "all"))
+    assert not models.calls
+
+
+def test_search_by_case_insensitive():
+    _, models, fns = build_tools()
+    fns["search_customers"]("a", search_by="EMAIL")
+    assert models.calls[0][2] == [[["email", "ilike", "a"]]]
+
+
+# --- error sanitizing ---
+
+TRACEBACK_FAULT = (
+    "Traceback (most recent call last):\n"
+    '  File "/opt/odoo/odoo/http.py", line 1, in dispatch\n'
+    "    result = secret_internal_call(db_password)\n"
+    '  File "/opt/odoo/addons/sale/models/sale.py", line 2, in create\n'
+    "odoo.exceptions.AccessError: You are not allowed to access 'Sales Order' records."
+)
+
+
+def test_safe_error_strips_traceback():
+    msg = safe_error(xmlrpc.client.Fault(1, TRACEBACK_FAULT))
+    assert msg == "Odoo error: odoo.exceptions.AccessError: You are not allowed to access 'Sales Order' records."
+    assert "File" not in msg and "secret_internal_call" not in msg
+
+
+def test_safe_error_first_line_truncated_and_readable():
+    assert safe_error(xmlrpc.client.Fault(1, "Access Denied\nsecond")) == "Odoo error: Access Denied"
+    long = safe_error(xmlrpc.client.Fault(1, "x" * 1000))
+    assert len(long) == len("Odoo error: ") + 200
+    assert safe_error(xmlrpc.client.Fault(1, "")) == "Odoo error: request failed"
+
+
+def test_safe_error_generic_for_other_exceptions():
+    assert safe_error(ConnectionRefusedError("10.0.0.5:8069 secret")) == (
+        "Odoo request failed: ConnectionRefusedError"
+    )
+
+
+def test_tool_error_results_do_not_leak_detail():
+    class Boom:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def execute_kw(self, *a):
+            raise self.exc
+
+    for exc in (xmlrpc.client.Fault(1, TRACEBACK_FAULT), OSError("db_password=hunter2")):
+        mcp = FastMCP("t")
+        OdooTools(mcp, OdooConfig(), SimpleNamespace(uid=1, models=Boom(exc)))
+        fns = {t.name: t.fn for t in mcp._tool_manager.list_tools()}
+        results = [
+            fns["get_products"]()["message"],
+            fns["get_customers"]()["message"],
+            fns["search_customers"]("a")["message"],
+            fns["create_customer"]("Z")["message"],
+            fns["create_order"]("a", 1)["message"],
+            fns["get_product_details"]("a"),
+            fns["get_order_details"](),
+        ]
+        for text in results:
+            assert "Traceback" not in text and "File " not in text
+            assert "secret_internal_call" not in text and "hunter2" not in text
+
+
+def test_create_order_one_invoice_failure_keeps_message():
+    _, models, fns = build_tools()
+    orig = models.execute_kw
+
+    def execute_kw(db, uid, cred, model, method, args, kw):
+        if (model, method) == ("sale.order", "read") and args[1] == ["invoice_ids"]:
+            return [{"invoice_ids": [1, 2]}]
+        return orig(db, uid, cred, model, method, args, kw)
+
+    models.execute_kw = execute_kw
+    r = fns["create_order"]("John", 5, create_invoice=True)
+    assert r["success"] is False and r["step"] == "create invoice" and r["order_id"] == 100
+    assert "Expected exactly one invoice on order 100, found [1, 2]" in r["message"]
+
+
+def test_create_order_fault_with_traceback_still_sanitized():
+    _, models, fns = build_tools()
+    orig = models.execute_kw
+
+    def execute_kw(db, uid, cred, model, method, args, kw):
+        if (model, method) == ("sale.order", "action_confirm"):
+            raise xmlrpc.client.Fault(1, TRACEBACK_FAULT)
+        return orig(db, uid, cred, model, method, args, kw)
+
+    models.execute_kw = execute_kw
+    r = fns["create_order"]("John", 5)
+    assert r["order_id"] == 100 and "AccessError" in r["message"]
+    assert "Traceback" not in r["message"] and "secret_internal_call" not in r["message"]

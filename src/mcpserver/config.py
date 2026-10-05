@@ -1,8 +1,13 @@
+import logging
 import os
 import re
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TIMEOUT = 30  # seconds
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 class ConfigValidationError(Exception):
@@ -82,6 +87,16 @@ class OdooConfig:
         With API key auth, the username is still needed for XML-RPC authenticate()."""
         return self.odoo_username or ""
 
+    def _warn_if_insecure_url(self):
+        """Warn (never block) when credentials would travel over plain HTTP to a remote host."""
+        parsed = urlparse(self.odoo_url)
+        if parsed.scheme.lower() == "http" and (parsed.hostname or "").lower() not in LOCAL_HOSTS:
+            logger.warning(
+                "ODOO_URL uses plain http:// to a non-local host (%s): credentials and data "
+                "are sent unencrypted. Use https:// instead.",
+                parsed.hostname,
+            )
+
     def _validate(self):
         missing = []
         if not self.odoo_url:
@@ -95,6 +110,8 @@ class OdooConfig:
         # Validate URL format
         if not self._URL_PATTERN.match(self.odoo_url):
             raise ConfigValidationError(f"ODOO_URL must start with http:// or https:// - got: {self.odoo_url}")
+
+        self._warn_if_insecure_url()
 
         # Validate timezone
         try:
