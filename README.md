@@ -41,7 +41,7 @@ odoo-mcp-server/
 - **OdooMCPServer**: Main server class handling Odoo connections and tool registration
 - **OdooConfig**: Configuration management with environment variable validation
 - **OdooTools**: Collection of MCP tools for Odoo operations
-- **FastMCP**: MCP server framework integration
+- **MCPServer** (MCP Python SDK 2.x, formerly FastMCP): MCP server framework integration
 
 ## 📋 Prerequisites
 
@@ -404,7 +404,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [Model Context Protocol](https://modelcontextprotocol.io) - The underlying protocol specification
 - [Odoo](https://www.odoo.com) - The ERP system this server integrates with
-- [FastMCP](https://github.com/jlowin/fastmcp) - The MCP server framework used
+- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) - The MCP server framework used (2.x, `MCPServer`)
 
 ## 📊 Changelog
 

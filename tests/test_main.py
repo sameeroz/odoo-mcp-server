@@ -1,6 +1,5 @@
 import pytest
-from mcp.shared.exceptions import McpError
-from mcp.types import ErrorData
+from mcp import MCPError
 
 from mcpserver import __main__ as entry
 
@@ -33,7 +32,7 @@ class _Server:
     [
         (None, 0),
         (KeyboardInterrupt(), 0),
-        (McpError(ErrorData(code=1, message="x")), 1),
+        (MCPError(1, "x"), 1),
         (ValueError("bad"), 1),
         (RuntimeError("boom"), 1),
     ],

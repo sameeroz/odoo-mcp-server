@@ -3,7 +3,7 @@ import os
 import sys
 from mcpserver.deployment import mcp
 from mcpserver.odoo_mcp_server import OdooMCPServer
-from mcp.shared.exceptions import McpError
+from mcp import MCPError
 from mcpserver.config import OdooConfig, ConfigValidationError
 
 # Configure logging
@@ -27,7 +27,7 @@ def main() -> int:
     except ConfigValidationError as cfg_err:
         print(f"Configuration validation error: {cfg_err}", file=sys.stderr)
         return 1
-    except McpError as e:
+    except MCPError as e:
         # You can log it on server
         logger.error("[MCP Server Error] %s", e)
         return 1

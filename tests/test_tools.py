@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import build_tools
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcpserver.config import OdooConfig
 from mcpserver.tools import (
@@ -38,9 +38,9 @@ def test_annotations():
         a = tool.annotations
         assert a is not None, name
         write = name in WRITE_TOOLS
-        assert a.readOnlyHint == (not write), name
-        assert a.idempotentHint == (not write), name
-        assert a.destructiveHint == (name == "create_order"), name
+        assert a.read_only_hint == (not write), name
+        assert a.idempotent_hint == (not write), name
+        assert a.destructive_hint == (name == "create_order"), name
 
 
 # --- _execute_odoo / error results ---
@@ -54,7 +54,7 @@ def test_execute_odoo_reraises_fault_and_passes_args():
 
     cfg = SimpleNamespace(odoo_database="d", auth_credential="k", odoo_read_only=True)
     server = SimpleNamespace(uid=9, models=SimpleNamespace(execute_kw=execute_kw))
-    t = OdooTools(FastMCP("t"), cfg, server)
+    t = OdooTools(MCPServer("t"), cfg, server)
     with pytest.raises(xmlrpc.client.Fault):
         t._execute_odoo("res.partner", "search", [[]], limit=1)
     assert calls == [("d", 9, "k", "res.partner", "search", [[]], {"limit": 1})]
@@ -89,7 +89,7 @@ def _failing_tools():
         def execute_kw(self, *a):
             raise xmlrpc.client.Fault(1, "boom")
 
-    mcp = FastMCP("t")
+    mcp = MCPServer("t")
     OdooTools(mcp, OdooConfig(), SimpleNamespace(uid=1, models=AlwaysFail()))
     return {t.name: t.fn for t in mcp._tool_manager.list_tools()}
 
@@ -497,7 +497,7 @@ def test_tool_error_results_do_not_leak_detail():
             raise self.exc
 
     for exc in (xmlrpc.client.Fault(1, TRACEBACK_FAULT), OSError("db_password=hunter2")):
-        mcp = FastMCP("t")
+        mcp = MCPServer("t")
         OdooTools(mcp, OdooConfig(), SimpleNamespace(uid=1, models=Boom(exc)))
         fns = {t.name: t.fn for t in mcp._tool_manager.list_tools()}
         results = [

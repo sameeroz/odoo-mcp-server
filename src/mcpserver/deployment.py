@@ -1,4 +1,4 @@
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("Odoo MCP Server")
+mcp = MCPServer("Odoo MCP Server")

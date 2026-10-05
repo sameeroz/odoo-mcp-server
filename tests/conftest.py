@@ -2,7 +2,7 @@ import xmlrpc.client
 from types import SimpleNamespace
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from mcpserver.config import OdooConfig
 from mcpserver.tools import OdooTools
@@ -79,10 +79,10 @@ class FakeModels:
 
 
 def build_tools(**kwargs):
-    """Register OdooTools on a fresh FastMCP; returns (mcp, models, tools-by-name)."""
+    """Register OdooTools on a fresh MCPServer; returns (mcp, models, tools-by-name)."""
     models = FakeModels(**kwargs)
     server = SimpleNamespace(uid=2, models=models)
-    mcp = FastMCP("test")
+    mcp = MCPServer("test")
     OdooTools(mcp, OdooConfig(), server)
     tools = {t.name: t.fn for t in mcp._tool_manager.list_tools()}
     return mcp, models, tools

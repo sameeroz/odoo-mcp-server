@@ -1,9 +1,10 @@
 from typing import Any, List
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from datetime import datetime, timezone
 import logging
 import math
+import threading
 import xmlrpc.client
 from zoneinfo import ZoneInfo
 
@@ -67,10 +68,12 @@ def validate_paging(limit, offset, max_limit, name="limit"):
 
 class OdooTools:
 
-    def __init__(self, mcp: FastMCP, config, odoo_server):
+    def __init__(self, mcp: MCPServer, config, odoo_server):
         self.mcp = mcp
         self.config = config
         self.odoo_server = odoo_server
+        # MCP 2.x runs sync tools on worker threads; the shared XML-RPC connection is not thread-safe.
+        self._rpc_lock = threading.Lock()
         self._add_read_tools()
         if config.odoo_read_only:
             logger.info("ODOO_READ_ONLY is set: write tools (create_customer, create_order) not registered.")
@@ -81,15 +84,16 @@ class OdooTools:
         """Helper to execute Odoo XML-RPC calls. Logs and re-raises any failure
         (xmlrpc.client.Fault is preserved so callers can tell Odoo errors apart)."""
         try:
-            return self.odoo_server.models.execute_kw(
-                self.config.odoo_database,
-                self.odoo_server.uid,
-                self.config.auth_credential,
-                model,
-                method,
-                args,
-                kwargs,
-            )
+            with self._rpc_lock:
+                return self.odoo_server.models.execute_kw(
+                    self.config.odoo_database,
+                    self.odoo_server.uid,
+                    self.config.auth_credential,
+                    model,
+                    method,
+                    args,
+                    kwargs,
+                )
         except Exception as e:
             logger.error("Odoo call failed for %s.%s: %s", model, method, e)
             raise
@@ -208,7 +212,7 @@ class OdooTools:
     def _add_read_tools(self):
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+                read_only_hint=True, destructive_hint=False, idempotent_hint=True
             )
         )
         def get_products(
@@ -280,7 +284,7 @@ class OdooTools:
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+                read_only_hint=True, destructive_hint=False, idempotent_hint=True
             )
         )
         def get_product_details(product_name: str):
@@ -331,7 +335,7 @@ class OdooTools:
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+                read_only_hint=True, destructive_hint=False, idempotent_hint=True
             )
         )
         def get_order_details(
@@ -429,7 +433,7 @@ class OdooTools:
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+                read_only_hint=True, destructive_hint=False, idempotent_hint=True
             )
         )
         def get_customers(limit: int = 20, offset: int = 0) -> dict:
@@ -485,7 +489,7 @@ class OdooTools:
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+                read_only_hint=True, destructive_hint=False, idempotent_hint=True
             )
         )
         def search_customers(
@@ -559,7 +563,7 @@ class OdooTools:
     def _add_write_tools(self):
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=False, destructiveHint=True, idempotentHint=False
+                read_only_hint=False, destructive_hint=True, idempotent_hint=False
             )
         )
         def create_order(
@@ -823,7 +827,7 @@ class OdooTools:
 
         @self.mcp.tool(
             annotations=ToolAnnotations(
-                readOnlyHint=False, destructiveHint=False, idempotentHint=False
+                read_only_hint=False, destructive_hint=False, idempotent_hint=False
             )
         )
         def create_customer(

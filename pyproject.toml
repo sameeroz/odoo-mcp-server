@@ -10,7 +10,7 @@ authors = [
 license = { text = "MIT" }
 keywords = ["mcp", "mcp-client", "odoo", "model-context-protocol", "openai", "odoo-mcp", "odoo-mcp-server"]
 dependencies = [
-    "mcp[cli]>=1.13.1",
+    "mcp[cli]>=2.3,<3",
     "python-dotenv>=1.0.0",
 ]
 
