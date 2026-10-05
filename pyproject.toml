@@ -12,8 +12,16 @@ keywords = ["mcp", "mcp-client", "odoo", "model-context-protocol", "openai", "od
 dependencies = [
     "mcp[cli]>=1.13.1",
     "python-dotenv>=1.0.0",
-    "pytz>=2025.2",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [project.scripts]
 odoo-mcp-server = "mcpserver.__main__:main"
@@ -27,3 +35,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

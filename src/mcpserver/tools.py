@@ -1,11 +1,11 @@
 from typing import Any, List
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import math
-import pytz
 import xmlrpc.client
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +39,14 @@ class OdooTools:
             logger.error("Odoo call failed for %s.%s: %s", model, method, e)
             raise
 
-    def _format_datetime(self, utc_string: str) -> str:
+    def _format_datetime(self, utc_string) -> str:
         """Convert UTC time string from Odoo to configured local time."""
+        if not utc_string:  # Odoo returns False for empty fields
+            return "N/A"
         utc_time = datetime.strptime(utc_string, "%Y-%m-%d %H:%M:%S")
-        local_tz = pytz.timezone(self.config.odoo_timezone)
+        local_tz = ZoneInfo(self.config.odoo_timezone)
         return (
-            utc_time.replace(tzinfo=pytz.utc)
+            utc_time.replace(tzinfo=timezone.utc)
             .astimezone(local_tz)
             .strftime("%Y-%m-%d %H:%M:%S")
         )
@@ -147,7 +149,7 @@ class OdooTools:
                 readOnlyHint=True, destructiveHint=False, idempotentHint=True
             )
         )
-        def get_products(product_names_lang: str = "en", limits: int = None) -> dict:
+        def get_products(product_names_lang: str = "en", limits: int | None = None) -> dict:
             """
             Returns a list of products from Odoo.
             Args:
@@ -186,7 +188,7 @@ class OdooTools:
                 return {"success": False, "message": f"Failed to retrieve products: {e}"}
 
             if not products:
-                return "No products available."
+                return {"products": [], "message": "No products available."}
 
             return {"products": products}
 
@@ -247,13 +249,13 @@ class OdooTools:
             )
         )
         def get_order_details(
-            limits=1, order_ids: List[Any] = None, fields: List[str] = None
+            limits: int = 1, order_ids: List[Any] = None, fields: List[str] = None
         ):
             """
             Retrieve and format order details from Odoo.
 
             Args:
-                limit (int): Maximum number of orders to retrieve if order_ids not provided.
+                limits (int): Maximum number of orders to retrieve if order_ids not provided.
                 order_ids (List[int], optional): Specific order IDs to fetch.
                 fields (List[str], optional): Specific fields to include in the output.
                                             If None, full order details are returned.

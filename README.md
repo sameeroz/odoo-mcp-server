@@ -238,6 +238,7 @@ Add to `~/.config/zed/settings.json`:
 
 - Retrieve product catalog with optional language and limit parameters
 - Supports: English (en), Arabic (ar), French (fr), Spanish (es)
+- Always returns a dictionary; when there are no products: `{"products": [], "message": "No products available."}`
 
 **`get_product_details`**
 
@@ -327,7 +328,7 @@ result = await mcp_client.call_tool("create_order", {
 | `ODOO_API_KEY`   | Odoo API key (preferred) | If no password   |         | `odoo_api_key_abc123`   |
 | `ODOO_USERNAME`  | Odoo username            | Yes (for API key & password) |  | `admin`               |
 | `ODOO_PASSWORD`  | Odoo password            | If no API key    |         | `admin123`              |
-| `ODOO_TIMEZONE`  | Timezone for dates       | No               | `UTC`   | `Asia/Riyadh`           |
+| `ODOO_TIMEZONE`  | IANA timezone for dates (validated at startup) | No               | `UTC`   | `Asia/Riyadh`           |
 | `ODOO_TIMEOUT`   | XML-RPC socket timeout in seconds (> 0) | No | `30` | `60`                |
 | `ODOO_PAYMENT_JOURNAL` | Journal name or code used by `create_order` payments (bank/cash journals only) | No | first bank/cash journal with an inbound payment method | `BNK1` |
 | `ODOO_READ_ONLY` | `true`/`false`/`1`/`0`/`yes`/`no`; when true the write tools (`create_customer`, `create_order`) are not registered | No | `false` | `true` |
@@ -338,6 +339,7 @@ result = await mcp_client.call_tool("create_order", {
 - URL must start with `http://` or `https://`
 - `ODOO_URL`, `ODOO_DATABASE` and one authentication method are required
 - `ODOO_READ_ONLY` must be one of true/false/1/0/yes/no; `ODOO_TIMEOUT` must be a number > 0
+- `ODOO_TIMEZONE` must be a valid IANA timezone name (e.g. `Asia/Riyadh`); an invalid value stops startup
 - Connection timeout defaults to 30 seconds (`ODOO_TIMEOUT`)
 
 ## 🔧 Development

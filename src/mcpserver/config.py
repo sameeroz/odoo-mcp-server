@@ -1,6 +1,6 @@
 import os
 import re
-from mcp.shared.exceptions import McpError, ErrorData
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEOUT = 30  # seconds
 
@@ -96,6 +96,12 @@ class OdooConfig:
         if not self._URL_PATTERN.match(self.odoo_url):
             raise ConfigValidationError(f"ODOO_URL must start with http:// or https:// - got: {self.odoo_url}")
 
+        # Validate timezone
+        try:
+            ZoneInfo(self.odoo_timezone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ConfigValidationError(f"ODOO_TIMEZONE is not a valid timezone name - got: {self.odoo_timezone}")
+
         # Must have either API key OR username+password
         has_api_key = bool(self.odoo_api_key)
         has_credentials = bool(self.odoo_username) and bool(self.odoo_password)
@@ -105,25 +111,3 @@ class OdooConfig:
                 "Authentication required: set ODOO_API_KEY (preferred) "
                 "or both ODOO_USERNAME and ODOO_PASSWORD"
             )
-
-    def as_dict(self):
-        """Return config values, hiding sensitive fields."""
-        return {
-            "odoo_url": self.odoo_url,
-            "odoo_database": self.odoo_database,
-            "auth_method": self.auth_method,
-            "odoo_username": self.auth_username,
-            "credential": "***",
-            "read_only": self.odoo_read_only,
-        }
-
-def prepare_error(code: int, message: str, data=None) -> McpError:
-    """
-    Helper to build an MCPError with given fields.
-    """
-    errdata = ErrorData(
-        code=code,
-        message=message,
-        data=data
-    )
-    return McpError(errdata)
