@@ -3,7 +3,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime
 import logging
 import pytz
-import xmlrpc
+import xmlrpc.client
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,8 @@ class OdooTools:
         self.odoo_server = odoo_server
 
     def _execute_odoo(self, model: str, method: str, args, **kwargs) -> Any:
-        """Helper to safely execute Odoo XML-RPC calls."""
+        """Helper to execute Odoo XML-RPC calls. Logs and re-raises any failure
+        (xmlrpc.client.Fault is preserved so callers can tell Odoo errors apart)."""
         try:
             return self.odoo_server.models.execute_kw(
                 self.config.odoo_database,
@@ -30,7 +31,7 @@ class OdooTools:
             )
         except Exception as e:
             logger.error("Odoo call failed for %s.%s: %s", model, method, e)
-            return []
+            raise
 
     def _format_datetime(self, utc_string: str) -> str:
         """Convert UTC time string from Odoo to configured local time."""
@@ -139,16 +140,19 @@ class OdooTools:
             else:
                 product_names_lang = "en_US"
 
-            products = self._execute_odoo(
-                "product.product",
-                "search_read",
-                [[]],
-                **{
-                    "fields": ["name", "list_price"],
-                    "context": {"lang": product_names_lang},
-                    **({"limit": limits} if limits else {}),
-                },
-            )
+            try:
+                products = self._execute_odoo(
+                    "product.product",
+                    "search_read",
+                    [[]],
+                    **{
+                        "fields": ["name", "list_price"],
+                        "context": {"lang": product_names_lang},
+                        **({"limit": limits} if limits else {}),
+                    },
+                )
+            except Exception as e:
+                return {"success": False, "message": f"Failed to retrieve products: {e}"}
 
             if not products:
                 return "No products available."
@@ -173,22 +177,25 @@ class OdooTools:
             language_fallbacks = ["en_US", "ar_001"]
             product_data = None
 
-            for lang in language_fallbacks:
+            try:
+                for lang in language_fallbacks:
 
-                searched_products = self._execute_odoo(
-                    "product.product",
-                    "search_read",
-                    [[["name", "ilike", product_name]]],
-                    **{
-                        "fields": ["id", "name", "list_price", "description_sale"],
-                        "limit": 1,
-                        "context": {"lang": (lang)},
-                    },
-                )
+                    searched_products = self._execute_odoo(
+                        "product.product",
+                        "search_read",
+                        [[["name", "ilike", product_name]]],
+                        **{
+                            "fields": ["id", "name", "list_price", "description_sale"],
+                            "limit": 1,
+                            "context": {"lang": (lang)},
+                        },
+                    )
 
-                if searched_products:
-                    product_data = searched_products[0]
-                    break
+                    if searched_products:
+                        product_data = searched_products[0]
+                        break
+            except Exception as e:
+                return f"Error: failed to retrieve product details: {e}"
 
             if not product_data:
                 return f"No product found with the name: {product_name}"
@@ -218,17 +225,20 @@ class OdooTools:
 
             search_domain = [] if order_ids is None else [["id", "in", order_ids]]
 
-            orders = self._execute_odoo(
-                "sale.order",
-                "search_read",
-                [
+            try:
+                orders = self._execute_odoo(
+                    "sale.order",
+                    "search_read",
                     [
-                        # ["partner_id.id", "=", emails[user_email]] # Filter by Employee Id
-                        *search_domain
-                    ]
-                ],
-                **{"limit": limits},
-            )
+                        [
+                            # ["partner_id.id", "=", emails[user_email]] # Filter by Employee Id
+                            *search_domain
+                        ]
+                    ],
+                    **{"limit": limits},
+                )
+            except Exception as e:
+                return f"Error: failed to retrieve orders: {e}"
 
             if not orders:
                 return "No orders available."
@@ -239,7 +249,10 @@ class OdooTools:
 
                 # Common values
                 formatted_date = self._format_datetime(order["date_order"])
-                order_items = self._get_order_lines(order.get("order_line", []))
+                try:
+                    order_items = self._get_order_lines(order.get("order_line", []))
+                except Exception as e:
+                    return f"Error: failed to retrieve order lines: {e}"
 
                 # Determine which fields to display
                 display_fields = fields or [
@@ -462,28 +475,31 @@ class OdooTools:
             Returns:
                 A dictionary with a list of customers and total count.
             """
-            # Get total count
-            total_count = self._execute_odoo(
-                "res.partner",
-                "search_count",
-                [[["|", ("is_company", "=", True), ("parent_id", "=", False)]]],
-            )
+            domain = ["|", ("is_company", "=", True), ("parent_id", "=", False)]
 
-            customers = self._execute_odoo(
-                "res.partner",
-                "search_read",
-                [[["|", ("is_company", "=", True), ("parent_id", "=", False)]]],
-                **{
-                    "fields": [
-                        "id", "name", "email", "phone", "mobile",
-                        "street", "city", "country_id",
-                        "customer_rank", "credit", "debit",
-                    ],
-                    "limit": limit,
-                    "offset": offset,
-                    "order": "name asc",
-                },
-            )
+            try:
+                # Get total count
+                total_count = self._execute_odoo(
+                    "res.partner", "search_count", [domain]
+                )
+
+                customers = self._execute_odoo(
+                    "res.partner",
+                    "search_read",
+                    [domain],
+                    **{
+                        "fields": [
+                            "id", "name", "email", "phone", "mobile",
+                            "street", "city", "country_id",
+                            "customer_rank", "credit", "debit",
+                        ],
+                        "limit": limit,
+                        "offset": offset,
+                        "order": "name asc",
+                    },
+                )
+            except Exception as e:
+                return {"success": False, "message": f"Failed to retrieve customers: {e}"}
 
             if not customers:
                 return {"customers": [], "total_count": 0, "message": "No customers found."}
@@ -528,18 +544,21 @@ class OdooTools:
 
             domain = search_fields.get(search_by.lower(), search_fields["name"])
 
-            customers = self._execute_odoo(
-                "res.partner",
-                "search_read",
-                [domain],
-                **{
-                    "fields": [
-                        "id", "name", "email", "phone", "mobile",
-                        "street", "city", "country_id",
-                    ],
-                    "limit": limit,
-                },
-            )
+            try:
+                customers = self._execute_odoo(
+                    "res.partner",
+                    "search_read",
+                    [domain],
+                    **{
+                        "fields": [
+                            "id", "name", "email", "phone", "mobile",
+                            "street", "city", "country_id",
+                        ],
+                        "limit": limit,
+                    },
+                )
+            except Exception as e:
+                return {"success": False, "message": f"Failed to search customers: {e}"}
 
             if not customers:
                 return {"customers": [], "message": f"No customers found matching '{query}'."}
@@ -576,44 +595,44 @@ class OdooTools:
             if not name or not name.strip():
                 return {"success": False, "message": "Customer name is required."}
 
-            # Check if customer already exists
-            existing = self._get_partner_id_by_name(name)
-            if existing:
-                return {
-                    "success": False,
-                    "message": f"A customer with the name '{name}' already exists (ID: {existing}).",
-                    "existing_id": existing,
+            try:
+                # Check if customer already exists
+                existing = self._get_partner_id_by_name(name)
+                if existing:
+                    return {
+                        "success": False,
+                        "message": f"A customer with the name '{name}' already exists (ID: {existing}).",
+                        "existing_id": existing,
+                    }
+
+                partner_data = {
+                    "name": name.strip(),
+                    "is_company": is_company,
+                    "customer_rank": 1,
                 }
 
-            partner_data = {
-                "name": name.strip(),
-                "is_company": is_company,
-                "customer_rank": 1,
-            }
+                if email:
+                    partner_data["email"] = email
+                if phone:
+                    partner_data["phone"] = phone
+                if mobile:
+                    partner_data["mobile"] = mobile
+                if street:
+                    partner_data["street"] = street
+                if city:
+                    partner_data["city"] = city
 
-            if email:
-                partner_data["email"] = email
-            if phone:
-                partner_data["phone"] = phone
-            if mobile:
-                partner_data["mobile"] = mobile
-            if street:
-                partner_data["street"] = street
-            if city:
-                partner_data["city"] = city
+                # Look up country by name if provided
+                if country:
+                    countries = self._execute_odoo(
+                        "res.country",
+                        "search_read",
+                        [[("name", "ilike", country)]],
+                        **{"fields": ["id", "name"], "limit": 1},
+                    )
+                    if countries:
+                        partner_data["country_id"] = countries[0]["id"]
 
-            # Look up country by name if provided
-            if country:
-                countries = self._execute_odoo(
-                    "res.country",
-                    "search_read",
-                    [[[("name", "ilike", country)]]],
-                    **{"fields": ["id", "name"], "limit": 1},
-                )
-                if countries:
-                    partner_data["country_id"] = countries[0]["id"]
-
-            try:
                 partner_id = self._execute_odoo(
                     "res.partner", "create", [partner_data]
                 )
@@ -625,4 +644,3 @@ class OdooTools:
             except Exception as e:
                 logger.exception("Error creating customer: %s", e)
                 return {"success": False, "message": f"Failed to create customer: {e}"}
-

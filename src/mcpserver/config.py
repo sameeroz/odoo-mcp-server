@@ -2,6 +2,9 @@ import os
 import re
 from mcp.shared.exceptions import McpError, ErrorData
 
+DEFAULT_TIMEOUT = 30  # seconds
+
+
 class ConfigValidationError(Exception):
     """Internal exception for config validation failures."""
 
@@ -20,6 +23,7 @@ class OdooConfig:
         self.odoo_url = os.getenv("ODOO_URL")
         self.odoo_database = os.getenv("ODOO_DATABASE")
         self.odoo_timezone = os.getenv("ODOO_TIMEZONE", "UTC")
+        self.odoo_timeout = self._parse_timeout(os.getenv("ODOO_TIMEOUT"))
 
         # Auth method 1: API key (preferred)
         self.odoo_api_key = os.getenv("ODOO_API_KEY")
@@ -29,6 +33,19 @@ class OdooConfig:
         self.odoo_password = os.getenv("ODOO_PASSWORD")
 
         self._validate()
+
+    @staticmethod
+    def _parse_timeout(raw: str | None) -> float:
+        """Parse ODOO_TIMEOUT (seconds); defaults to DEFAULT_TIMEOUT when unset."""
+        if raw is None or raw.strip() == "":
+            return DEFAULT_TIMEOUT
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ConfigValidationError(f"ODOO_TIMEOUT must be a number of seconds - got: {raw}")
+        if value <= 0:
+            raise ConfigValidationError(f"ODOO_TIMEOUT must be greater than 0 - got: {raw}")
+        return value
 
     @property
     def auth_method(self) -> str:

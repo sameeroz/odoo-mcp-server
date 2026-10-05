@@ -16,31 +16,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> int:
     try:
         config = OdooConfig()
         server = OdooMCPServer(mcp, config)
         server.initialize_server()
         mcp.run()
+        return 0
 
     except ConfigValidationError as cfg_err:
         print(f"Configuration validation error: {cfg_err}", file=sys.stderr)
+        return 1
     except McpError as e:
         # You can log it on server
         logger.error("[MCP Server Error] %s", e)
         return 1
     except KeyboardInterrupt:
         logger.info("Server stopped by user.")
-        return "Server stopped."
+        return 0
     except ValueError as e:
         # Configuration errors
         logger.error("Configuration error: %s", e)
         logger.error("Please check your environment variables or .env file")
         return 1
-    except Exception as e:
-        logger.error("Error initializing OdooMCPServer: %s", e)
-        raise e
+    except Exception:
+        logger.exception("Error running OdooMCPServer")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
