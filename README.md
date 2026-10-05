@@ -101,7 +101,7 @@ Add this configuration to your MCP settings:
   "mcpServers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_DATABASE": "your-database-name-here",
@@ -120,7 +120,7 @@ Add this configuration to your MCP settings:
   "mcpServers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_DATABASE": "your-database-name-here",
@@ -142,7 +142,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -166,7 +166,7 @@ Add to `~/.cursor/mcp_settings.json`:
   "mcpServers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -190,7 +190,7 @@ Add to your VS Code settings (`~/.vscode/mcp_settings.json` or workspace setting
   "github.copilot.chat.mcpServers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -214,7 +214,7 @@ Add to `~/.config/zed/settings.json`:
   "context_servers": {
     "odoo": {
       "command": "uv",
-      "args": ["run", "src/mcpserver/__main__.py"],
+      "args": ["--directory", "/path/to/odoo-mcp-server", "run", "odoo-mcp-server"],
       "env": {
         "ODOO_URL": "https://your-odoo-instance.com",
         "ODOO_USERNAME": "your-username-here",
@@ -273,7 +273,13 @@ Add to `~/.config/zed/settings.json`:
 **`create_order`**
 
 - Create new sales orders with automatic invoice and payment processing
-- Parameters: customer_name, product_id, create_invoice, finish_payment
+- Parameters: customer_name, product_id, quantity (default 1, must be > 0), create_invoice, finish_payment
+- Customer must match exactly one customer by name (case-insensitive). If several or only partial matches exist, nothing is created and `candidates` (id, name) are returned
+- `create_invoice` creates and posts the invoice via Odoo's standard invoicing wizard (invoices delivered quantities, following each product's invoicing policy)
+- `finish_payment` registers a full payment and implies `create_invoice` (enabled automatically)
+- If a step fails after the order exists, the result has `success: false`, the failed `step` and the `order_id`/`invoice_id` created so far. Do not retry blindly
+- Not idempotent: it confirms orders, posts invoices and registers payments
+- Not registered when `ODOO_READ_ONLY` is enabled
 
 ### Example Usage in MCP Client
 
@@ -304,6 +310,7 @@ result = await mcp_client.call_tool("create_customer", {
 result = await mcp_client.call_tool("create_order", {
     "customer_name": "John Doe",
     "product_id": 123,
+    "quantity": 2,
     "create_invoice": True,
     "finish_payment": True
 })
@@ -321,13 +328,17 @@ result = await mcp_client.call_tool("create_order", {
 | `ODOO_USERNAME`  | Odoo username            | Yes (for API key & password) |  | `admin`               |
 | `ODOO_PASSWORD`  | Odoo password            | If no API key    |         | `admin123`              |
 | `ODOO_TIMEZONE`  | Timezone for dates       | No               | `UTC`   | `Asia/Riyadh`           |
+| `ODOO_TIMEOUT`   | XML-RPC socket timeout in seconds (> 0) | No | `30` | `60`                |
+| `ODOO_PAYMENT_JOURNAL` | Journal name or code used by `create_order` payments (bank/cash journals only) | No | first bank/cash journal with an inbound payment method | `BNK1` |
+| `ODOO_READ_ONLY` | `true`/`false`/`1`/`0`/`yes`/`no`; when true the write tools (`create_customer`, `create_order`) are not registered | No | `false` | `true` |
 | `ODOO_LOG_LEVEL` | Logging level            | No               | `INFO`  | `DEBUG`                 |
 
 ### Validation Rules
 
 - URL must start with `http://` or `https://`
-- All environment variables are required
-- Connection timeout: 30 seconds
+- `ODOO_URL`, `ODOO_DATABASE` and one authentication method are required
+- `ODOO_READ_ONLY` must be one of true/false/1/0/yes/no; `ODOO_TIMEOUT` must be a number > 0
+- Connection timeout defaults to 30 seconds (`ODOO_TIMEOUT`)
 
 ## 🔧 Development
 
@@ -345,6 +356,13 @@ To add new MCP tools:
 1. Add the tool method to the `OdooTools` class in `tools.py`
 2. Use the `@self.mcp.tool()` decorator
 3. Include proper type hints and docstrings
+
+## 🔒 Security / Least Privilege
+
+- Create a **dedicated Odoo user** for this server (with an API key) and grant only the access rights it needs. A read-only role is enough for the read tools.
+- Set `ODOO_READ_ONLY=true` unless you need to create customers or orders. The write tools are then not exposed to the MCP client at all.
+- Write tools are annotated for MCP clients (`readOnlyHint`, `destructiveHint`, `idempotentHint`) so they can ask for confirmation; `create_order` is marked destructive because it confirms orders, posts invoices and registers payments.
+- Use `https://` for `ODOO_URL`. Over `http://` the credentials and data travel unencrypted.
 
 ## 🔒 Security Considerations
 

@@ -1,7 +1,9 @@
 from typing import Any, List
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from datetime import datetime
 import logging
+import math
 import pytz
 import xmlrpc.client
 
@@ -12,9 +14,13 @@ class OdooTools:
 
     def __init__(self, mcp: FastMCP, config, odoo_server):
         self.mcp = mcp
-        self._add_mcp_tools()
         self.config = config
         self.odoo_server = odoo_server
+        self._add_read_tools()
+        if config.odoo_read_only:
+            logger.info("ODOO_READ_ONLY is set: write tools (create_customer, create_order) not registered.")
+        else:
+            self._add_write_tools()
 
     def _execute_odoo(self, model: str, method: str, args, **kwargs) -> Any:
         """Helper to execute Odoo XML-RPC calls. Logs and re-raises any failure
@@ -73,49 +79,74 @@ class OdooTools:
             )
         return "\n".join(lines_text)
 
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        """Escape LIKE wildcards so user text is matched literally in (=)ilike searches."""
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def _find_partners_by_name(self, name: str, limit: int = 5):
+        """
+        Look up partners by name, exact (case-insensitive) matches first.
+        Returns (exact, fuzzy): lists of {id, name}. `fuzzy` is only populated
+        when there is no exact match.
+        """
+        escaped = self._escape_like(name.strip())
+        search = dict(fields=["id", "name"], limit=limit, order="id asc")
+        exact = self._execute_odoo(
+            "res.partner", "search_read", [[["name", "=ilike", escaped]]], **search
+        )
+        if exact:
+            return exact, []
+        fuzzy = self._execute_odoo(
+            "res.partner", "search_read", [[["name", "ilike", escaped]]], **search
+        )
+        return [], fuzzy
+
     def _get_partner_id_by_name(self, name):
         """
         Fetches the partner ID from Odoo given a contact (customer) name.
+        Only an exact (case-insensitive) name match counts; fuzzy matches are ignored.
         Returns the partner ID if found, otherwise None.
         """
-        partners = self._execute_odoo(
-            "res.partner",
-            "search_read",
-            [[["name", "ilike", name]]],
-            **{
-                "fields": ["id", "name"],
-                "limit": 1,
-            },
-        )
-        if partners:
-            return partners[0]["id"]
-        return None
+        exact, _ = self._find_partners_by_name(name, limit=1)
+        return exact[0]["id"] if exact else None
 
-    def _get_default_journal_and_payment_method(self):
+    def _get_payment_journal(self):
+        """
+        Returns (journal_id, payment_method_line_id, error). If ODOO_PAYMENT_JOURNAL is set
+        it is matched (exactly, case-insensitive) against journal name or code; otherwise the
+        first bank/cash journal with an inbound payment method line is used.
+        """
+        domain = [["type", "in", ["bank", "cash"]]]
+        configured = self.config.odoo_payment_journal
+        if configured:
+            escaped = self._escape_like(configured)
+            domain += ["|", ["name", "=ilike", escaped], ["code", "=ilike", escaped]]
         journals = self._execute_odoo(
             "account.journal",
             "search_read",
-            [
-                [],
-                [
-                    "id",
-                    "name",
-                    "type",
-                    "inbound_payment_method_line_ids",
-                    "outbound_payment_method_line_ids",
-                ],
-            ],
+            [domain],
+            **{"fields": ["id", "name", "inbound_payment_method_line_ids"], "order": "sequence, id"},
         )
-        
         for journal in journals:
-            if journal["name"] == "Bank" and journal["inbound_payment_method_line_ids"]:
-                return journal["id"], journal["inbound_payment_method_line_ids"][0]
-            elif journal["name"] == "Cash" and journal["inbound_payment_method_line_ids"]:
-                return journal["id"], journal["inbound_payment_method_line_ids"][0]
-        return None, None
+            if journal["inbound_payment_method_line_ids"]:
+                return journal["id"], journal["inbound_payment_method_line_ids"][0], None
+        if configured:
+            return None, None, (
+                f"Payment journal '{configured}' (ODOO_PAYMENT_JOURNAL) was not found as a "
+                "bank/cash journal with an inbound payment method."
+            )
+        return None, None, (
+            "No bank or cash journal with an inbound payment method was found. "
+            "Configure one in Odoo or set ODOO_PAYMENT_JOURNAL."
+        )
 
-    def _add_mcp_tools(self):
-        @self.mcp.tool()
+    def _add_read_tools(self):
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+            )
+        )
         def get_products(product_names_lang: str = "en", limits: int = None) -> dict:
             """
             Returns a list of products from Odoo.
@@ -159,7 +190,11 @@ class OdooTools:
 
             return {"products": products}
 
-        @self.mcp.tool()
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+            )
+        )
         def get_product_details(product_name: str):
             """
             Get product details from Odoo by product name.
@@ -183,7 +218,7 @@ class OdooTools:
                     searched_products = self._execute_odoo(
                         "product.product",
                         "search_read",
-                        [[["name", "ilike", product_name]]],
+                        [[["name", "ilike", self._escape_like(product_name)]]],
                         **{
                             "fields": ["id", "name", "list_price", "description_sale"],
                             "limit": 1,
@@ -206,7 +241,11 @@ class OdooTools:
                 f"Description: {product_data.get('description_sale', 'No description available.')}"
             )
 
-        @self.mcp.tool()
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+            )
+        )
         def get_order_details(
             limits=1, order_ids: List[Any] = None, fields: List[str] = None
         ):
@@ -288,182 +327,11 @@ class OdooTools:
 
             return "\n\n".join(results)
 
-        @self.mcp.tool()
-        def create_order(
-            customer_name: str, product_id: int, create_invoice: bool = False, finish_payment: bool = False
-        ) -> dict:
-            """
-            Securely creates an order in Odoo, generates the corresponding invoice,
-            and processes the payment.
-
-            Args:
-                product_id (int): The ID of the product to order.
-                create_invoice (bool, optional): Flag to determine if an invoice should be created.
-                finish_payment (bool, optional): Flag to determine if payment should be processed.
-
-            Returns:
-                Dict[str, Any]: A structured result containing success status,
-                order/invoice IDs, total amount, and messages.
-            """
-            try:
-                if not product_id:
-                    return {
-                        "success": False,
-                        "message": "Product ID is required to create an order.",
-                    }
-                    
-                if customer_name is None or customer_name.strip() == "":
-                    return {
-                        "success": False,
-                        "message": "Customer name is required to create an order.",
-                    }
-
-                # --- Check product existence ---
-                check_product_existence = self._execute_odoo(
-                    "product.product",
-                    "search_read",
-                    [[["id", "=", product_id]]],
-                    **{
-                        "fields": ["id", "name", "list_price", "description_sale"],
-                        "limit": 1,
-                    },
-                )
-
-                if not check_product_existence:
-                    return {
-                        "success": False,
-                        "message": f"No product found with the ID: {product_id}",
-                    }
-
-                # --- Get or validate customer (partner) ---
-                partner_id = self._get_partner_id_by_name(customer_name)
-
-                if partner_id is None:
-                    return {
-                        "success": False,
-                        "message": f"No customer found with the name: {customer_name}",
-                    }
-
-                # --- Create sales order --
-                order_id = self._execute_odoo(
-                    "sale.order",
-                    "create",
-                    [
-                        {
-                            "partner_id": partner_id,
-                            "state": "draft",
-                        }
-                    ],
-                )
-
-                order_line_data = {
-                    "order_id": order_id,
-                    "product_id": product_id,
-                    "product_uom_qty": 1,
-                }
-
-                # --- Create order line BEFORE confirming ---
-                line_id = self._execute_odoo(
-                    "sale.order.line", "create", [order_line_data]
-                )
-
-                # --- Confirm order ---
-                self._execute_odoo("sale.order", "action_confirm", [order_id])
-
-                # --- Create and post invoice ---
-
-                if create_invoice:
-
-                    invoice_id = self._execute_odoo(
-                        "account.move",
-                        "create",
-                        [
-                            {
-                                "move_type": "out_invoice",
-                                "partner_id": partner_id,  # Customer being invoiced
-                                "invoice_line_ids": [  # --- Create invoice lines ---
-                                    (
-                                        0,
-                                        0,
-                                        {
-                                            "product_id": product_id,
-                                            "quantity": 1,
-                                            "sale_line_ids": [(6, 0, [line_id])],
-                                        },
-                                    )
-                                ],
-                            }
-                        ],
-                    )
-                    
-                    # --- Post the invoice ---
-                    self._execute_odoo("account.move", "action_post", [invoice_id])
-
-                    # --- Retrieve total amount ---
-                    invoice_data = self._execute_odoo(
-                        "account.move", "read", [[invoice_id], ["amount_total"]]
-                    )
-                    total_amount = invoice_data[0].get("amount_total", 0.0)
-
-                    # --- Register payment ---
-                    if finish_payment:
-                        
-                        # --- Get default journal and payment method ---
-                        journal_id, payment_method_line_id = self._get_default_journal_and_payment_method()
-                        
-                        payment_register_id = self._execute_odoo(
-                            "account.payment.register",
-                            "create",
-                            [
-                                {
-                                    "journal_id": journal_id,
-                                    "payment_method_line_id": payment_method_line_id,
-                                }
-                            ],
-                            **{
-                                "context": {
-                                    "active_model": "account.move",
-                                    "active_ids": [invoice_id],
-                                }
-                            },
-                        )
-
-                        self._execute_odoo(
-                            "account.payment.register",
-                            "action_create_payments",
-                            [[payment_register_id]],
-                        )
-
-                    return {
-                        "success": True,
-                        "message": "Order and invoice created successfully.",
-                        "order_id": order_id,
-                        "invoice_id": invoice_id,
-                        "total_amount": total_amount or 0
-                    }
-
-                return {
-                    "success": True,
-                    "message": "Order created successfully.",
-                    "order_id": order_id,
-                }
-
-            except xmlrpc.client.Fault as e:
-                err_msg = str(e)
-                if "Record does not exist or has been deleted" in err_msg:
-                    logger.error("Missing product record: %s", err_msg)
-                    return {
-                        "success": False,
-                        "message": "One of the products does not exist in Odoo.",
-                    }
-                logger.error("XML-RPC Fault: %s", err_msg)
-                return {"success": False, "message": f"Odoo fault: {err_msg}"}
-
-            except Exception as e:
-                logger.exception("Unexpected error creating order: %s", e)
-                return {"success": False, "message": f"Unexpected error: {e}"}
-
-        @self.mcp.tool()
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+            )
+        )
         def get_customers(limit: int = 20, offset: int = 0) -> dict:
             """
             Retrieve a list of customers (partners) from Odoo.
@@ -511,7 +379,11 @@ class OdooTools:
                 "offset": offset,
             }
 
-        @self.mcp.tool()
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True, destructiveHint=False, idempotentHint=True
+            )
+        )
         def search_customers(
             query: str, search_by: str = "name", limit: int = 10
         ) -> dict:
@@ -529,16 +401,17 @@ class OdooTools:
             if not query or not query.strip():
                 return {"success": False, "message": "Search query is required."}
 
+            q = self._escape_like(query)
             search_fields = {
-                "name": [["name", "ilike", query]],
-                "email": [["email", "ilike", query]],
-                "phone": ["|", ["phone", "ilike", query], ["mobile", "ilike", query]],
+                "name": [["name", "ilike", q]],
+                "email": [["email", "ilike", q]],
+                "phone": ["|", ["phone", "ilike", q], ["mobile", "ilike", q]],
                 "all": [
                     "|", "|", "|",
-                    ["name", "ilike", query],
-                    ["email", "ilike", query],
-                    ["phone", "ilike", query],
-                    ["mobile", "ilike", query],
+                    ["name", "ilike", q],
+                    ["email", "ilike", q],
+                    ["phone", "ilike", q],
+                    ["mobile", "ilike", q],
                 ],
             }
 
@@ -565,7 +438,276 @@ class OdooTools:
 
             return {"customers": customers, "count": len(customers)}
 
-        @self.mcp.tool()
+    def _add_write_tools(self):
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=False, destructiveHint=True, idempotentHint=False
+            )
+        )
+        def create_order(
+            customer_name: str,
+            product_id: int,
+            quantity: float = 1,
+            create_invoice: bool = False,
+            finish_payment: bool = False,
+        ) -> dict:
+            """
+            Create and confirm a sales order in Odoo, optionally invoicing and paying it.
+            This confirms the order and, if requested, posts an invoice and registers a
+            payment. It is NOT idempotent: do not retry blindly, see the failure result.
+
+            Args:
+                customer_name (str): Customer name. Must match exactly one customer
+                    (case-insensitive). If there are several or only partial matches,
+                    nothing is created and the candidates are returned for the caller
+                    to choose from.
+                product_id (int): The ID of the product to order.
+                quantity (float, optional): Quantity to order, must be greater than 0 (default 1).
+                create_invoice (bool, optional): Create and post a customer invoice for the order.
+                finish_payment (bool, optional): Register a full payment for the invoice
+                    using a bank/cash journal. Implies create_invoice (enabled automatically).
+
+            Returns:
+                Dict[str, Any]: success, message, and order_id / invoice_id / total_amount.
+                If a step fails after the order was created, success is False and the
+                result contains the ids created so far plus the failed 'step'.
+            """
+            created = {}
+            step = "validation"
+            try:
+                if not product_id:
+                    return {
+                        "success": False,
+                        "message": "Product ID is required to create an order.",
+                    }
+
+                if customer_name is None or customer_name.strip() == "":
+                    return {
+                        "success": False,
+                        "message": "Customer name is required to create an order.",
+                    }
+
+                if (
+                    isinstance(quantity, bool)
+                    or not isinstance(quantity, (int, float))
+                    or not math.isfinite(quantity)
+                    or quantity <= 0
+                ):
+                    return {
+                        "success": False,
+                        "message": f"Quantity must be a number greater than 0 - got: {quantity}",
+                    }
+
+                notes = []
+                if finish_payment and not create_invoice:
+                    create_invoice = True
+                    notes.append("finish_payment requires an invoice, so create_invoice was enabled.")
+
+                # --- Check product existence ---
+                step = "check product"
+                check_product_existence = self._execute_odoo(
+                    "product.product",
+                    "search_read",
+                    [[["id", "=", product_id]]],
+                    **{
+                        "fields": ["id", "name", "list_price", "description_sale"],
+                        "limit": 1,
+                    },
+                )
+
+                if not check_product_existence:
+                    return {
+                        "success": False,
+                        "message": f"No product found with the ID: {product_id}",
+                    }
+
+                # --- Resolve customer: exact match only, never guess ---
+                step = "resolve customer"
+                exact, fuzzy = self._find_partners_by_name(customer_name)
+                if len(exact) == 1:
+                    partner_id = exact[0]["id"]
+                elif exact or fuzzy:
+                    candidates = [{"id": p["id"], "name": p["name"]} for p in (exact or fuzzy)][:5]
+                    reason = "Multiple customers match" if exact else "No exact customer match for"
+                    return {
+                        "success": False,
+                        "message": (
+                            f"{reason} '{customer_name}'. No order was created; "
+                            "retry with the exact customer name."
+                        ),
+                        "candidates": candidates,
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"No customer found with the name: {customer_name}",
+                    }
+
+                # --- Resolve payment journal up front so we fail before creating anything ---
+                journal_id = payment_method_line_id = None
+                if finish_payment:
+                    step = "resolve payment journal"
+                    journal_id, payment_method_line_id, journal_error = self._get_payment_journal()
+                    if journal_error:
+                        return {"success": False, "message": journal_error}
+
+                # --- Create sales order ---
+                step = "create order"
+                order_id = self._execute_odoo(
+                    "sale.order",
+                    "create",
+                    [
+                        {
+                            "partner_id": partner_id,
+                            "state": "draft",
+                        }
+                    ],
+                )
+                created["order_id"] = order_id
+                logger.info("create_order: created sale.order id=%s", order_id)
+
+                # --- Create order line BEFORE confirming ---
+                step = "create order line"
+                self._execute_odoo(
+                    "sale.order.line",
+                    "create",
+                    [
+                        {
+                            "order_id": order_id,
+                            "product_id": product_id,
+                            "product_uom_qty": quantity,
+                        }
+                    ],
+                )
+
+                # --- Confirm order ---
+                step = "confirm order"
+                self._execute_odoo("sale.order", "action_confirm", [[order_id]])
+                logger.info("create_order: confirmed sale.order id=%s", order_id)
+
+                invoice_id = None
+                payment_registered = False
+
+                if create_invoice:
+                    # --- Create invoice through the public invoicing wizard ---
+                    step = "create invoice"
+                    wizard_ctx = {
+                        "context": {
+                            "active_model": "sale.order",
+                            "active_ids": [order_id],
+                            "active_id": order_id,
+                        }
+                    }
+                    wizard_id = self._execute_odoo(
+                        "sale.advance.payment.inv",
+                        "create",
+                        [{"advance_payment_method": "delivered"}],
+                        **wizard_ctx,
+                    )
+                    self._execute_odoo(
+                        "sale.advance.payment.inv", "create_invoices", [[wizard_id]], **wizard_ctx
+                    )
+                    order_data = self._execute_odoo(
+                        "sale.order", "read", [[order_id], ["invoice_ids"]]
+                    )
+                    invoice_ids = order_data[0].get("invoice_ids", []) if order_data else []
+                    if len(invoice_ids) != 1:
+                        raise RuntimeError(
+                            f"Expected exactly one invoice on order {order_id}, found {invoice_ids}"
+                        )
+                    invoice_id = invoice_ids[0]
+                    created["invoice_id"] = invoice_id
+                    logger.info(
+                        "create_order: created account.move id=%s for sale.order id=%s",
+                        invoice_id, order_id,
+                    )
+
+                    # --- Post the invoice ---
+                    step = "post invoice"
+                    self._execute_odoo("account.move", "action_post", [[invoice_id]])
+                    logger.info("create_order: posted account.move id=%s", invoice_id)
+
+                    # --- Register payment ---
+                    if finish_payment:
+                        step = "register payment"
+                        payment_ctx = {
+                            "context": {
+                                "active_model": "account.move",
+                                "active_ids": [invoice_id],
+                            }
+                        }
+                        payment_register_id = self._execute_odoo(
+                            "account.payment.register",
+                            "create",
+                            [
+                                {
+                                    "journal_id": journal_id,
+                                    "payment_method_line_id": payment_method_line_id,
+                                }
+                            ],
+                            **payment_ctx,
+                        )
+                        self._execute_odoo(
+                            "account.payment.register",
+                            "action_create_payments",
+                            [[payment_register_id]],
+                            **payment_ctx,
+                        )
+                        payment_registered = True
+                        logger.info("create_order: registered payment for account.move id=%s", invoice_id)
+
+                # --- Retrieve total amount ---
+                step = "read total"
+                if invoice_id:
+                    total_data = self._execute_odoo(
+                        "account.move", "read", [[invoice_id], ["amount_total"]]
+                    )
+                else:
+                    total_data = self._execute_odoo(
+                        "sale.order", "read", [[order_id], ["amount_total"]]
+                    )
+                total_amount = (total_data[0].get("amount_total") or 0.0) if total_data else 0.0
+
+                message = "Order created and confirmed"
+                if invoice_id:
+                    message += ", invoice posted"
+                if payment_registered:
+                    message += ", payment registered"
+                message += "."
+                result = {
+                    "success": True,
+                    "message": " ".join([message] + notes),
+                    "order_id": order_id,
+                    "invoice_id": invoice_id,
+                    "total_amount": total_amount,
+                }
+                return result
+
+            except Exception as e:
+                if isinstance(e, xmlrpc.client.Fault):
+                    logger.error("XML-RPC Fault in create_order (step: %s): %s", step, e)
+                    detail = f"Odoo fault: {e}"
+                else:
+                    logger.exception("Unexpected error in create_order (step: %s): %s", step, e)
+                    detail = f"Unexpected error: {e}"
+                if not created:
+                    return {"success": False, "step": step, "message": f"Failed at step '{step}': {detail}"}
+                return {
+                    "success": False,
+                    "step": step,
+                    "message": (
+                        f"Failed at step '{step}' after records were already created: {detail}. "
+                        "Do NOT retry create_order (it would duplicate them); inspect and "
+                        "finish the listed records in Odoo."
+                    ),
+                    **created,
+                }
+
+        @self.mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=False, destructiveHint=False, idempotentHint=False
+            )
+        )
         def create_customer(
             name: str,
             email: str = "",
@@ -627,7 +769,7 @@ class OdooTools:
                     countries = self._execute_odoo(
                         "res.country",
                         "search_read",
-                        [[("name", "ilike", country)]],
+                        [[("name", "ilike", self._escape_like(country))]],
                         **{"fields": ["id", "name"], "limit": 1},
                     )
                     if countries:
@@ -636,6 +778,7 @@ class OdooTools:
                 partner_id = self._execute_odoo(
                     "res.partner", "create", [partner_data]
                 )
+                logger.info("create_customer: created res.partner id=%s", partner_id)
                 return {
                     "success": True,
                     "message": f"Customer '{name}' created successfully.",

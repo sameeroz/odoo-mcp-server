@@ -24,6 +24,9 @@ class OdooConfig:
         self.odoo_database = os.getenv("ODOO_DATABASE")
         self.odoo_timezone = os.getenv("ODOO_TIMEZONE", "UTC")
         self.odoo_timeout = self._parse_timeout(os.getenv("ODOO_TIMEOUT"))
+        self.odoo_read_only = self._parse_bool("ODOO_READ_ONLY", os.getenv("ODOO_READ_ONLY"))
+        # Journal (name or code) used for payments; None = first bank/cash journal
+        self.odoo_payment_journal = (os.getenv("ODOO_PAYMENT_JOURNAL") or "").strip() or None
 
         # Auth method 1: API key (preferred)
         self.odoo_api_key = os.getenv("ODOO_API_KEY")
@@ -46,6 +49,18 @@ class OdooConfig:
         if value <= 0:
             raise ConfigValidationError(f"ODOO_TIMEOUT must be greater than 0 - got: {raw}")
         return value
+
+    @staticmethod
+    def _parse_bool(var: str, raw: str | None, default: bool = False) -> bool:
+        """Parse a boolean env var (true/false/1/0/yes/no); defaults when unset or empty."""
+        if raw is None or raw.strip() == "":
+            return default
+        value = raw.strip().lower()
+        if value in ("true", "1", "yes"):
+            return True
+        if value in ("false", "0", "no"):
+            return False
+        raise ConfigValidationError(f"{var} must be one of true/false/1/0/yes/no - got: {raw}")
 
     @property
     def auth_method(self) -> str:
@@ -99,6 +114,7 @@ class OdooConfig:
             "auth_method": self.auth_method,
             "odoo_username": self.auth_username,
             "credential": "***",
+            "read_only": self.odoo_read_only,
         }
 
 def prepare_error(code: int, message: str, data=None) -> McpError:
